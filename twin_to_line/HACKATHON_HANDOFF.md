@@ -4,12 +4,12 @@ Updated: 2026-10-14 11:10 CT · New session: work from `~/code/ignite`, run `git
 ## Project
 **Twin-to-Line** — Rockwell × NVIDIA Physical AI Innovation Lab, Dataset 1 (Final Vial Inspection). Commission the Good-fixture (G01–G30) overhead inspector from the CSI digital twin, using synthetic data to eliminate or sharply reduce the real defect data and line time needed at a changeover.
 - Primary experiment: synthetic-only training → real evaluation (zero real images = best case, not a requirement; D003).
-- Fallback: synthetic + nested predetermined real sets of 5 / 10 / 20 examples from runs 1–3 → same holdout → report performance vs. real examples (D014).
+- Central experiment (data efficiency): real-only vs twin-assisted performance as the number of real labeled defect examples grows, at doses 0 / 5 / 10 / 20 (twin-assisted dose 0 = the synthetic-only point above); real sets fixed in advance and nested where feasible; same evaluation set for every arm. Unit = independent placement event: adjacent or repeated video frames never count as separate examples. Posted DEV runs 1–3 hold too few independent defect events (7) to fill every dose, so the hand-staged CSI collection is expected to supply the experiment.
 - Not "AI cap detection" (D002).
 Decision doc (research, matrix, twin results in 2b, paste-ready team plan in section 13): https://claude.ai/code/artifact/34a0c4d3-4d98-4a90-81d6-d6eee43c37fc
 
 ## Architecture
-Commissioning (GPU): twin files → position map at cap-top height (`capsealcam.py`) → golden image per position → Replicator defect renders (USD overrides) → small model (TAO Visual ChangeNet; ResNet-18 fallback).
+Commissioning (GPU): twin files → position map at cap-top height (`capsealcam.py`) → golden image per position → Replicator defect renders (USD overrides) → ResNet-18 crop classifier (primary learned model). Simple deterministic CV rule = baseline. TAO Visual ChangeNet = optional comparison only if useful and time permits.
 Runtime (laptop): cap_seal frame → arm-clear check → 30 crops → score → fill-sequence logic → operator map (pass / defect / missed / waiting) + simulated stop flag. Cosmos escalation optional (D008). No PLC connection (MAIC rule).
 
 ## Confirmed facts

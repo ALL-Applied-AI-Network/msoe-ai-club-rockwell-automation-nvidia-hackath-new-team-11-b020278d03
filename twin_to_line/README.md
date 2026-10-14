@@ -1,6 +1,7 @@
-# Twin-to-Line kit v2 — sim-to-real gate (frozen: gate-v2.0, see MANIFEST.sha256)
+# Twin-to-Line kit v2 — sim-to-real gate (frozen: gate-v2.0.2, see MANIFEST.sha256 → 8 × OK)
 
-Start here: `HACKATHON_HANDOFF.md`, then `DECISIONS.md`.
+Start here: `HACKATHON_HANDOFF.md`, then `DECISIONS.md`. Gate decision rule, version history (v2.0 → v2.0.2) and the current
+runbook (copies only the kit files to the instance): `GATE_v2.0.2.md`.
 
 Goal: six tiny Isaac Sim renders through CapSealCam, to measure the sim-to-real gap before any dataset or training.
 
@@ -43,3 +44,31 @@ Expected at the end of the log: six `exit=0` lines and `DONE -> .../results.tar.
 - Earlier tools: `registration.py`, `tilt_sensitivity.py`, `twin_positions.py`, `overlay.py`.
 
 Twin note: the twin README says it was tested with Isaac Sim 6.0; `run_log.txt` records the version actually used.
+
+## Real-image prototype (DEV runs 1-3 only; laptop, no GPU)
+`real frame -> twin G01-G30 map (+ DEV offset) -> 30 crops -> rule inspector -> fill-order reasoning -> PASS / DEFECT / MISSED / WAITING / UNSURE`
+Setup: `python3.11 -m venv ../.venv && ../.venv/bin/pip install -r requirements.txt`. Data paths: `IGNITE_REAL` (default `~/Downloads/csi-vial-fill-dataset/cap_seal`), twin dir as an argument.
+```bash
+python export_position_map.py ~/Downloads/csi_digital_twin/csi_digital_twin_v1   # -> position_map_G.json (twin only)
+python events.py --run 1                     # classifier-free placement events (video 1); --source stills for runs 2-3
+python register_dev.py                       # -> registration_dev.json (DEV offset) + overlays / crop sheets
+python rules.py --fit labels/dev_labels.csv  # -> rule_thresholds.json (DEV labels only)
+python inspect_frame.py --run 1 --events --k-from-events          # end to end, one frame per event
+python inspect_frame.py cap_seal_20260922_192609_126406.jpg --infer-k --debug
+python eval_metrics.py results/prototype/inspect/dev_events_predictions.csv --labels labels/dev_labels.csv
+python -m pytest tests -q
+```
+- `real_data.py` refuses runs 4-5 and unassigned frames everywhere (stills, videos, cached copies of video frames).
+- `fill_state.py` holds the manufacturing semantics; inspectors only report what a crop looks like.
+- Outputs go to `results/prototype/` (gitignored). `labels/dev_labels.csv` are draft visual labels (status=draft).
+
+## Dataset contract for the ResNet-18 experiment (not trained yet)
+- One crop function for both domains: `positions.extract_crops` + `crop_for_model` (pad 6 px, 64x64). Synthetic crops
+  must be cut from the same twin map, never re-derived.
+- Visual classes: `pass`, `missing_cap`, `crooked_cap` (displaced/tilted, >= ~15-20 deg target, D005-D006), `no_vial`.
+  MISSED vs WAITING is never a visual class; `fill_state.py` decides it from K.
+- Arms: synthetic-only; real-only; synthetic + real dose N in {0, 5, 10, 20} real DEFECT examples with matched real
+  passes (`dose_sets.py`: nested, class-stratified, one unit per placement event, refuses test/holdout rows).
+- Unit = placement event (`events.py`), not video frame. DEV runs 1-3 give 7 independent cap-defect units
+  (5 displaced caps, 2 uncapped vials): `make_dose_sets` refuses 10 and 20 by design, so the dose curve needs the
+  hand-staged CSI collection.

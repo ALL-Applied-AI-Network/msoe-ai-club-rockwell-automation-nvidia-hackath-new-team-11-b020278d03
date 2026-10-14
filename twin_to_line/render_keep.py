@@ -22,7 +22,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--twin", required=True, help="csi_digital_twin_v1 folder")  # IGNITE
 ap.add_argument("--camera", required=True, choices=["CapSealCam", "FillCam"],
                 help="camera name; settings come from cameras/<name>.json")
-ap.add_argument("--stage", default=os.path.join(HERE, "csi_line.usda"), help="csi_line.usda or one station file")
+ap.add_argument("--stage", default="csi_line.usda", help="csi_line.usda or one station file")
 ap.add_argument("--frame", type=int, default=1, help="time code (fill station animation: 1-686 at 30 fps)")
 ap.add_argument("--out", default="render.png")
 ap.add_argument("--subframes", type=int, default=32, help="path-tracing subframes (quality)")

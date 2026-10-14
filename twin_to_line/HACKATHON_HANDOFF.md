@@ -1,0 +1,83 @@
+# Team Ignite — Handoff (read first)
+Updated: 2026-10-13 21:45 CT · New session: read this + `DECISIONS.md`, inspect the real files, continue from **NEXT ACTION**, do not reopen settled decisions without new evidence. Replace stale facts here; no diary.
+
+## Project
+**Twin-to-Line** — Rockwell × NVIDIA Physical AI Innovation Lab, Dataset 1 (Final Vial Inspection). Commission the Good-fixture (G01–G30) overhead inspector from the CSI digital twin, using synthetic data to eliminate or sharply reduce the real defect data and line time needed at a changeover.
+- Primary experiment: synthetic-only training → real evaluation (zero real images = best case, not a requirement; D003).
+- Fallback: synthetic + nested predetermined real sets of 5 / 10 / 20 examples from runs 1–3 → same holdout → report performance vs. real examples (D014).
+- Not "AI cap detection" (D002).
+Decision doc (research, matrix, twin results in 2b, paste-ready team plan in section 13): https://claude.ai/code/artifact/34a0c4d3-4d98-4a90-81d6-d6eee43c37fc
+
+## Architecture
+Commissioning (GPU): twin files → position map at cap-top height (`capsealcam.py`) → golden image per position → Replicator defect renders (USD overrides) → small model (TAO Visual ChangeNet; ResNet-18 fallback).
+Runtime (laptop): cap_seal frame → arm-clear check → 30 crops → score → fill-sequence logic → operator map (pass / defect / missed / waiting) + simulated stop flag. Cosmos escalation optional (D008). No PLC connection (MAIC rule).
+
+## Confirmed facts
+- Scope: Dataset 1, Good fixture G01–G30. Twin S fixture has no hole map (5 scrap vials lying down) → S out of scope.
+- Twin: `G01–G30_tube` / `_cap` are separate editable prims; defect states authored as small USD override layers; numbering G01–G05 = rightmost column top→bottom = fill order. Station in inches under a 0.0254 root scale.
+- Tanner (Oct 13, organizers): teams may use real, synthetic, new CSI data or any mix; vial/cap dimensions are preserved in the USD geometry/units/transforms → twin USD is the dimensional source of truth (D015); auto-labeling tool promised, not yet delivered.
+- Camera: CapSealCam pipeline reproduced (`capsealcam.py` = `tools/apply_lens.py` to 0.001 px). Registration on real frames: 4.4 px median raw; after one global (−0.3, −3.6) px offset, seated caps 3.2 px median / 5.3 px p90. Good enough to continue, not perfect.
+- Crooked caps (from twin geometry): ~2 px at 10°, ~3 px at 15°, ~4–4.5 px at 20°, ~7 px at 30°; level 5 mm lift ≈ 0.3 px; a 2° whole-vial lean moves the cap ~2.3 px. → Target tilts ≈15–20°+, report smaller tilt/lift as a likely camera-information limit, confirm with known-angle CSI examples (D005, D006, D016).
+- Sequence: empty inside the placed prefix = missed; after it = waiting. A real placement count / order-complete signal is still wanted.
+- Liquid: tray twin has none (vial plastic opacity 0). Plan: simple colored cylinder + material (D013); no fluid sim. Real uncapped vial from above reads dark grey-green.
+- Real camera noise σ ≈ 2.7 gray levels; frame-to-frame p99 |Δ| = 12.
+
+## Real-data boundary (D011, `real_splits.json`)
+- **Runs 1–3**: development/reference — visual inspection, sim-to-real comparison, sanity checks, auto-labeling review; adaptation ONLY if D014 triggers (nested 5 ⊂ 10 ⊂ 20, chosen in advance).
+- **Runs 4–5**: model holdout — never for classifier training, thresholds, prompt examples, augmentation decisions, choosing the synthetic recipe, or picking a model because it does better there. 8 of their frames were used for the Oct 13 geometry/noise check → valid model holdout, not a pristine end-to-end source.
+- **CSI deliberate-defect collection** (hand-staged, D016): preferred final end-to-end evaluation; any adaptation subset chosen in advance and kept separate.
+- Unit = placement event, not frame.
+
+## Current experiment — Isaac Sim appearance gate (kit **gate-v2.0**, frozen, NOT run)
+Question: is synthetic appearance close enough to real cap_seal imagery for synthetic-first training to be credible? Outcome: PASS / PASS WITH WORK / FAIL.
+Renders (CapSealCam 768×576 pinhole → real lens → 640×480, PathTracing, 64 subframes): `baseline` (as shipped) · `t00` (G01 pass, G02 missing cap, G03 0°, G04 missing vial = missed placement) · `t10` / `t20` / `t30` (only G03 tilt changes) · `liquid` (t20 + liquid cylinders).
+Records: GPU, Isaac version, settings, per-render timings, cost if `RATE_PER_HR` set, undistorted + final images, crops, labels, scene layers, kit checksums. Then `compare_gate.py` (geometry, appearance ΔE per region, noise, crooked-cap visibility vs real seated-cap variation; DEV runs only).
+**Blocked on official team Brev access.** No personal spending (D010).
+
+## Team
+- Noor (captain): plan, geometry, evaluation, sequence logic, demo; runs the gate if needed.
+- Muhammad Aadil (remote, India): Isaac Sim / Replicator — yes/no + weekly hours due **Wed Oct 14 6 pm CT**.
+- Jordan Henderson (EE, UWM): CSI line + data collection — data access + CSI visit availability due **Thu Oct 15**.
+- Angelica withdrew; Jared unresponsive; Tom (CSI) looking into merging small teams.
+
+## Resources / access
+- Requested in plan: Brev $160 ≈ 25 GPU-hours, RTX PRO 6000 preferred, AWS L40S fallback, Start/Stop environments, log GPU/version/runtime/storage/credits. build.nvidia.com Cosmos Reason (free). UWM DGX Spark requested separately via UWM. Claude: $100 plan (Noor); $20 plan (Muhammad) only if he confirms.
+- Brev org link: not received. Timing after submission is inferred, not confirmed. No link by ~Fri Oct 16 → Dan Schneider in #compute-questions.
+- Noor has a personal NVIDIA cloud account (team-ignite-uwm) — no card, do not launch from it.
+
+## Deadlines
+Team plan **Wed Oct 14 11:59 pm CT** · Final submission Sun Nov 1 11:59 pm CT · Finals Thu Nov 5, MSOE Diercks Hall, 5–8 pm.
+
+## Paths (Noor's Mac)
+- Kit: `~/Downloads/twin_to_line_kit/` — this file, `DECISIONS.md`, `real_splits.json`, `README.md`, gate scripts (`run_gate.sh`, `make_variants.py`, `render_keep.py`, `cut_crops.py`, `compare_gate.py`, `capsealcam.py`), `eval_metrics.py`, earlier tools; `_old_v1/` superseded.
+- Twin: `~/Downloads/csi_digital_twin/csi_digital_twin_v1/` · Real data: `~/Downloads/csi-vial-fill-dataset/cap_seal/`
+- Team repo (GitHub, not cloned; kit not in git): ALL-Applied-AI-Network/msoe-ai-club-rockwell-automation-nvidia-hackath-new-team-11-b020278d03. Frozen state = `MANIFEST.sha256` + `KIT_VERSION`.
+
+## Known-working commands
+- `sha256sum -c MANIFEST.sha256` → 6 × OK
+- `python3 eval_metrics.py --selftest` → "selftest passed…"
+- `python make_variants.py <twin> <out>` (needs usd-core) → 6 scenes, labels self-checked
+- On Brev: `RATE_PER_HR=<$/hr> bash ~/twin_to_line_kit/run_gate.sh` → `~/ignite_gate/results.tar.gz` (dry-run verified up to Isaac detection)
+- After: `python compare_gate.py <results> <real_frames_dir> <twin> <out>` → `gate_report.json` + panels (tested on stand-in renders)
+
+## Known failures / risks
+- Isaac Sim never run; `render_keep.py` untested on GPU. Twin README: tested with Isaac Sim 6.0; launchable version unknown. If Isaac runs in Docker on the instance, run inside it (`ISAAC_PY=…`).
+- Drive download on the instance may fail → `brev copy` the twin zip (script prints the command).
+- `usd-core` has no Linux-aarch64 wheel (fine on Mac native, x86 Linux, Brev).
+- UsdPreviewSurface liquid may render as plain alpha, not refraction — the gate will show.
+- Real test set is small; recall will have wide uncertainty until the CSI collection exists.
+- Later (not the gate): TAO needs NGC + Hugging Face accounts.
+
+## Open questions (in the team plan)
+Crooked-cap tilt/condition and acceptable vial lean/placement tolerance · same G01–G30 numbering? · placement count / order-complete logged for existing runs or available during our test · can CSI produce the hand-staged collection, and when; held-out real set? · when do Brev org links and UWM Spark access go out · team merge.
+
+## Tomorrow (admin only)
+1. 6 pm: read Muhammad's reply → edit section 13 members line + keep/remove the bracketed $20 Claude line (remove the bracket text either way).
+2. Post the hand-staged data request in #data-and-testbed-requests tagging Shamar (text = section 13, data item 1).
+3. Paste section 13 into the team-plan form; submit by ~9 pm.
+
+## When Brev arrives
+Join org link → Isaac Sim launchable, RTX PRO 6000 (else AWS L40S with Start/Stop) → note $/hr → `brev copy ~/Downloads/twin_to_line_kit <instance>:/home/ubuntu` → `brev shell` → `RATE_PER_HR=… bash ~/twin_to_line_kit/run_gate.sh` → copy back `results.tar.gz` → **stop the instance** → run `compare_gate.py` → record PASS / PASS WITH WORK / FAIL in the doc and here.
+
+## NEXT ACTION
+Submit the team plan (decision doc section 13) by Wed Oct 14 11:59 pm CT, after applying Muhammad's 6 pm reply to the members and coding-agent lines.

@@ -16,10 +16,10 @@ Path tracing, 64 subframes per frame, 2 orchestrator steps (the twin's own rende
 
 ## Run on the Brev Isaac Sim launchable (about 20–30 min of instance time)
 ```bash
-brev copy twin_to_line_kit <instance-name>:/home/ubuntu      # from your Mac, in ~/Downloads
+brev copy ~/code/ignite/twin_to_line <instance-name>:/home/ubuntu   # from your Mac
 brev shell <instance-name>
-RATE_PER_HR=<$/hr shown in Brev> bash ~/twin_to_line_kit/run_gate.sh   # downloads the twin, finds Isaac Sim, logs cost
-#   if it cannot find Isaac Sim:  ISAAC_PY=/path/to/python.sh bash ~/twin_to_line_kit/run_gate.sh
+RATE_PER_HR=<$/hr shown in Brev> bash ~/twin_to_line/run_gate.sh   # downloads the twin, finds Isaac Sim, logs cost
+#   if it cannot find Isaac Sim:  ISAAC_PY=/path/to/python.sh bash ~/twin_to_line/run_gate.sh
 exit
 brev copy <instance-name>:/home/ubuntu/ignite_gate/results.tar.gz ~/Downloads/   # then STOP the instance
 ```

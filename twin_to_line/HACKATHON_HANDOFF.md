@@ -1,5 +1,5 @@
 # Team Ignite — Handoff (read first)
-Updated: 2026-10-13 21:45 CT · New session: read this + `DECISIONS.md`, inspect the real files, continue from **NEXT ACTION**, do not reopen settled decisions without new evidence. Replace stale facts here; no diary.
+Updated: 2026-10-13 22:00 CT · New session: work from `~/code/ignite`, run `git status` first, read this + `DECISIONS.md`, continue from **NEXT ACTION**, do not reopen settled decisions without new evidence. Replace stale facts here; no diary.
 
 ## Project
 **Twin-to-Line** — Rockwell × NVIDIA Physical AI Innovation Lab, Dataset 1 (Final Vial Inspection). Commission the Good-fixture (G01–G30) overhead inspector from the CSI digital twin, using synthetic data to eliminate or sharply reduce the real defect data and line time needed at a changeover.
@@ -48,16 +48,20 @@ Records: GPU, Isaac version, settings, per-render timings, cost if `RATE_PER_HR`
 ## Deadlines
 Team plan **Wed Oct 14 11:59 pm CT** · Final submission Sun Nov 1 11:59 pm CT · Finals Thu Nov 5, MSOE Diercks Hall, 5–8 pm.
 
-## Paths (Noor's Mac)
-- Kit: `~/Downloads/twin_to_line_kit/` — this file, `DECISIONS.md`, `real_splits.json`, `README.md`, gate scripts (`run_gate.sh`, `make_variants.py`, `render_keep.py`, `cut_crops.py`, `compare_gate.py`, `capsealcam.py`), `eval_metrics.py`, earlier tools; `_old_v1/` superseded.
+## Source of truth
+- Repo: https://github.com/ALL-Applied-AI-Network/msoe-ai-club-rockwell-automation-nvidia-hackath-new-team-11-b020278d03 · branch `main` · gate kit committed in `c673212`.
+- Local clone: `~/code/ignite` · project directory: `twin_to_line/` (this file, `DECISIONS.md`, `real_splits.json`, `README.md`, gate scripts `run_gate.sh` `make_variants.py` `render_keep.py` `cut_crops.py` `compare_gate.py` `capsealcam.py`, `eval_metrics.py`, earlier tools). Repo-root `README.md` is the organizers' — leave it.
+- `~/Downloads/twin_to_line_kit/` is a backup only (also holds `_old_v1/` and `twin_findings.jpg`, deliberately not committed). All future work, including Claude Code sessions, happens in the repo.
+
+## Data paths (Noor's Mac, not in git)
 - Twin: `~/Downloads/csi_digital_twin/csi_digital_twin_v1/` · Real data: `~/Downloads/csi-vial-fill-dataset/cap_seal/`
-- Team repo (GitHub, not cloned; kit not in git): ALL-Applied-AI-Network/msoe-ai-club-rockwell-automation-nvidia-hackath-new-team-11-b020278d03. Frozen state = `MANIFEST.sha256` + `KIT_VERSION`.
+- Frozen gate state = `MANIFEST.sha256` + `KIT_VERSION` (gate-v2.0). `.gitignore` keeps data, twins, archives, renders, results and weights out of git.
 
 ## Known-working commands
-- `sha256sum -c MANIFEST.sha256` → 6 × OK
+- In `twin_to_line/`: `shasum -a 256 -c MANIFEST.sha256` (Mac) or `sha256sum -c MANIFEST.sha256` (Linux) → 6 × OK
 - `python3 eval_metrics.py --selftest` → "selftest passed…"
 - `python make_variants.py <twin> <out>` (needs usd-core) → 6 scenes, labels self-checked
-- On Brev: `RATE_PER_HR=<$/hr> bash ~/twin_to_line_kit/run_gate.sh` → `~/ignite_gate/results.tar.gz` (dry-run verified up to Isaac detection)
+- On Brev: `RATE_PER_HR=<$/hr> bash ~/twin_to_line/run_gate.sh` → `~/ignite_gate/results.tar.gz` (dry-run verified up to Isaac detection)
 - After: `python compare_gate.py <results> <real_frames_dir> <twin> <out>` → `gate_report.json` + panels (tested on stand-in renders)
 
 ## Known failures / risks
@@ -77,7 +81,7 @@ Crooked-cap tilt/condition and acceptable vial lean/placement tolerance · same 
 3. Paste section 13 into the team-plan form; submit by ~9 pm.
 
 ## When Brev arrives
-Join org link → Isaac Sim launchable, RTX PRO 6000 (else AWS L40S with Start/Stop) → note $/hr → `brev copy ~/Downloads/twin_to_line_kit <instance>:/home/ubuntu` → `brev shell` → `RATE_PER_HR=… bash ~/twin_to_line_kit/run_gate.sh` → copy back `results.tar.gz` → **stop the instance** → run `compare_gate.py` → record PASS / PASS WITH WORK / FAIL in the doc and here.
+Join org link → Isaac Sim launchable, RTX PRO 6000 (else AWS L40S with Start/Stop) → note $/hr → `brev copy ~/code/ignite/twin_to_line <instance>:/home/ubuntu` → `brev shell` → `RATE_PER_HR=… bash ~/twin_to_line/run_gate.sh` → copy back `results.tar.gz` → **stop the instance** → run `compare_gate.py` → record PASS / PASS WITH WORK / FAIL in the doc and here.
 
 ## NEXT ACTION
 Submit the team plan (decision doc section 13) by Wed Oct 14 11:59 pm CT, after applying Muhammad's 6 pm reply to the members and coding-agent lines.

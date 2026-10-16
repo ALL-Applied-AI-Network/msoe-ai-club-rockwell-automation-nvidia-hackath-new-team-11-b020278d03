@@ -1,6 +1,7 @@
 import os, sys, unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from fill_state import resolve_state, infer_fill_count, resolve_fixture, resolve_occupancy, SequenceTracker
+from fill_state import (resolve_state, infer_fill_count, resolve_fixture, resolve_occupancy, SequenceTracker,
+                        LIVE_FILL, FINAL_INSPECTION)
 
 S = lambda i, K, v: resolve_state(i, K, v)[0]
 
@@ -75,6 +76,9 @@ class OfflineFillCount(unittest.TestCase):
             resolve_fixture(["GOOD"] * 30)
         with self.assertRaises(ValueError):
             resolve_occupancy(fx({1}), frontier="missed")
+        for mode in ("complete", True, None):                         # no implicit / boolean completion
+            with self.assertRaises(ValueError):
+                resolve_occupancy(fx({1}), mode=mode)
 
 
 class OccupancyOnly(unittest.TestCase):
@@ -132,14 +136,22 @@ class OccupancyOnly(unittest.TestCase):
         self.assertEqual(set(st[6:]), {"WAITING"})
         self.assertEqual(states(fx({1, 2}, G04="unknown", G06="pass"))[2:6], ["MISSED", "UNSURE", "MISSED", "PASS"])
 
-    def test_completed_fixture(self):
+    def test_live_fill_examples(self):
+        st = states(fx(set(range(1, 9)) | {10}), mode=LIVE_FILL)     # G01-G08, G09 empty, G10 occupied
+        self.assertEqual(st[8], "MISSED")
+        st = states(fx(set(range(1, 9))), mode=LIVE_FILL)              # G01-G08, G09-G30 empty
+        self.assertNotIn("MISSED", st)                                # nothing promoted while filling may continue
+        self.assertEqual(set(st[8:]), {"WAITING"})
+
+    def test_final_inspection_is_external_context(self):
         v = fx(set(range(1, 21)) - {7})
-        st = states(v, complete=True)
+        st = states(v, mode=FINAL_INSPECTION)
         self.assertEqual(st[6], "MISSED")                             # internal empty
         self.assertEqual(set(st[20:]), {"MISSED"})                    # a complete good order has 30 vials
         self.assertNotIn("WAITING", st)
-        self.assertEqual(states(fx(set(range(1, 31))), complete=True), ["PASS"] * 30)
-        self.assertEqual(states(v)[20:], ["WAITING"] * 10)            # same frame, order still running
+        self.assertIn("test protocol/operator", resolve_occupancy(v, mode=FINAL_INSPECTION)[1][25][1])
+        self.assertEqual(states(fx(set(range(1, 31))), mode=FINAL_INSPECTION), ["PASS"] * 30)
+        self.assertEqual(states(v)[20:], ["WAITING"] * 10)            # same frame, default LIVE_FILL
 
 
 class Tracker(unittest.TestCase):
@@ -189,12 +201,19 @@ class Tracker(unittest.TestCase):
             v = fx(occ)
             self.assertEqual([s for s, _ in t.update(v)[2]], states(v))
 
+    def test_final_inspection_tracker(self):
+        t = SequenceTracker(persist=1, mode=FINAL_INSPECTION)
+        st = t.update(fx(set(range(1, 29))))[2]                       # protocol says complete; G29-G30 empty
+        self.assertEqual((st[28][0], st[29][0]), ("MISSED", "MISSED"))
+
     def test_bad_args(self):
-        for p in (0, -1, 1.5, None):
+        for p in (0, -1, 1.5, None, True):
             with self.assertRaises(ValueError):
                 SequenceTracker(persist=p)
         with self.assertRaises(ValueError):
             SequenceTracker(frontier="missed")
+        with self.assertRaises(ValueError):
+            SequenceTracker(mode="complete")
 
 
 if __name__ == "__main__":

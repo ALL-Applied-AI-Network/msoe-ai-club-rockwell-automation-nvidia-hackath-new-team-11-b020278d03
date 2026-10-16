@@ -55,14 +55,16 @@ python register_dev.py                       # -> registration_dev.json (DEV off
 python rules.py --fit labels/dev_labels.csv  # -> rule_thresholds.json (DEV labels only)
 python inspect_frame.py --run 1 --events --track                  # end to end, one frame per event, occupancy + tracker
 python inspect_frame.py --run 1 --events --k-from-events          # comparison: K from the camera's own event counter
-python inspect_frame.py cap_seal_20260922_192609_126406.jpg --debug   # single frame; add --complete for a finished order
-python validate_official_grid.py <labeler>/calibration.json --example <labeler>/examples/tray_000001.jpg   # twin layout vs organizer grid
+python inspect_frame.py cap_seal_20260922_192609_126406.jpg --debug   # single frame, LIVE_FILL; --mode final_inspection only when the test protocol declares the fixture complete
+python check_organizer_grid.py <labeler>/calibration.json --example <labeler>/examples/tray_000001.jpg   # organizer-grid consistency check
 python eval_metrics.py results/prototype/inspect/dev_events_predictions.csv --labels labels/dev_labels.csv
 python -m pytest tests -q
 ```
 - `real_data.py` refuses runs 4-5 and unassigned frames everywhere (stills, videos, cached copies of video frames).
 - `fill_state.py` holds the manufacturing semantics; inspectors only report what a crop looks like. The line has no
-  placement count: MISSED / WAITING come from occupancy (+ `SequenceTracker`); `--fill-count` is offline metadata only.
+  placement count or order-complete signal: MISSED / WAITING come from occupancy (+ `SequenceTracker`) in LIVE_FILL
+  (default) or FINAL_INSPECTION (external protocol/operator context, never from the equipment); `--fill-count` is
+  offline metadata only.
 - G01-G30 is the twin's numbering (our convention), not CSI's internal position numbers (D022).
 - Outputs go to `results/prototype/` (gitignored). `labels/dev_labels.csv` are draft visual labels (status=draft).
 

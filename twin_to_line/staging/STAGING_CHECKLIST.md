@@ -8,6 +8,10 @@ staged event (D011), never a frame.
 - The line has **no placement count or order-complete signal**. MISSED vs WAITING is decided by `fill_state.py` from
   occupancy (D021). The stager still records the true sequence state as **ground truth** (`gt_sequence`), which is
   never a runtime input.
+- Completion context comes from this protocol, not the equipment. Before capture, the stager records
+  `inspection_mode`:
+  - `final_inspection`: the fixture is declared complete, so every empty position is MISSED;
+  - `live_fill`: a partial fixture, so trailing empties are WAITING.
 - **Position names are the twin's G01–G30** (G01 top-right, down the column, then one column left). CSI's internal
   numbering is different and not available, so never write "position 7" for G07 (D022).
 - **Crooked cap = any cap not fully seated** (organizers). Our refinement: target visible tilt or displacement of
@@ -24,9 +28,10 @@ staged event (D011), never a frame.
 - `staging_log_template.csv`: one row per G position per staged event.
 
 ## 1. Start of every session: camera and empty-fixture check (record, never tune)
-1. Record which overhead camera and resolution the station uses today. The twin map is solved for the 640×480
-   cap_seal camera; the organizers' Oct 14 release uses a 1920×1080 view rotated about 3.6° from it. If today's
-   camera is not the 640×480 cap_seal view, stop and flag it to Noor. Do not stage.
+1. Record which physical overhead camera, feed and resolution CSI provides today; CSI has not confirmed this yet.
+   The twin map is solved for the 640×480 cap_seal view. The organizers' labeling-tool examples use a different
+   1920×1080 view. If today's feed is not the 640×480 cap_seal view, flag it to Noor before staging: the twin crop
+   map cannot be used on that view until its camera projection is solved.
 2. G fixture empty, arm clear. Save one frame and note its file name.
 3. From `twin_to_line/`:
    ```bash
@@ -74,6 +79,7 @@ only if the training rule allows it, and is decided before the session.
 | `position` | Twin G01–G30 (not CSI numbering); record all 30 positions per event |
 | `staged_state` | what the stager physically set: `pass`, `missing_cap`, `crooked_cap`, `displaced_cap`, `no_vial`, `damaged_vial` |
 | `defect_class` | official visual class: `pass`, `missing_cap`, `crooked_cap`, `damaged_vial`, `no_vial` |
+| `inspection_mode` | `live_fill` or `final_inspection` (fixture declared complete by this protocol), set before capture |
 | `gt_sequence` | for `no_vial` only: `missed` (skipped inside the order) or `waiting` (not yet filled); stager ground truth, never a runtime input |
 | `known_tilt_deg` | measured cap tilt for `crooked_cap` when known; blank otherwise |
 | `approx_severity` | `shallow` (<15°), `medium` (15–25°), `strong` (>25°) or `displaced`, for `crooked_cap` |

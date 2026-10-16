@@ -1,7 +1,7 @@
 """End-to-end real-frame inspection: frame -> twin G01-G30 map (+ DEV offset) -> 30 crops -> inspector ->
 fill-order reasoning -> PASS / DEFECT / MISSED / WAITING / UNSURE -> annotated image + JSON / CSV.
 
-    python inspect_frame.py SOURCE... [--complete] [--frontier waiting|unsure] [--track] [--debug] [--out DIR]
+    python inspect_frame.py SOURCE... [--mode live_fill|final_inspection] [--frontier waiting|unsure] [--track] [--debug] [--out DIR]
     python inspect_frame.py --run 1 --events [--track | --k-from-events]
 
 SOURCE = a still name/path or a DEV video frame id (cap_seal_video_1.mp4@t0612.0). Runs 4-5 are refused.
@@ -9,7 +9,9 @@ Default: MISSED / WAITING from occupancy only (fill_state.py, D021); the line ha
 --events reads results/prototype/events/events_run{N}_*.csv (events.py): one frame per placement event.
 --track: feed the frames in order through fill_state.SequenceTracker (--persist frames, default 1 for --events
   because each event frame is already a stable segment, else 2).
---complete: the order is declared finished (a complete good order = 30 vials), so trailing empties are MISSED.
+--mode live_fill (default): the fixture may still be filling; trailing empties are WAITING.
+--mode final_inspection: the test protocol/operator says this fixture is expected complete now (a complete good order
+  = 30 vials), so every empty position is MISSED. External context only: the equipment has no order-complete signal.
 --fill-count K: OFFLINE metadata only (synthetic / staged ground truth), never a runtime input.
 --k-from-events: K = placements counted by the classifier-free event detector (first event = baseline,
   its K from occupancy; each later event adds one placement). Kept for comparison with the default.
@@ -19,14 +21,14 @@ import cv2, numpy as np
 import positions as P
 import real_data as R
 import events as E
-from fill_state import resolve_fixture, SequenceTracker
+from fill_state import resolve_fixture, SequenceTracker, LIVE_FILL, MODES
 from rules import RuleInspector
 
 OUT = os.path.join(P.HERE, "results", "prototype", "inspect")
 COLORS = {"PASS": (0, 170, 0), "DEFECT": (0, 0, 230), "MISSED": (200, 0, 200), "WAITING": (150, 150, 150), "UNSURE": (0, 150, 255)}
 
 
-def inspect(img, src, pm, inspector, fill_count=None, plate=None, complete=False, frontier="waiting", tracker=None):
+def inspect(img, src, pm, inspector, fill_count=None, plate=None, mode=LIVE_FILL, frontier="waiting", tracker=None):
     t0 = time.perf_counter()
     arm = E.arm_pixels(img, pm, plate)
     crops = P.extract_crops(img, pm, src)
@@ -37,12 +39,12 @@ def inspect(img, src, pm, inspector, fill_count=None, plate=None, complete=False
     visuals = [o.visual_state for o in obs]
     if tracker is not None and fill_count is None:
         if all(v == "unknown" for v in visuals):            # arm frame: not a valid frame, history unchanged
-            K, ksrc, states = resolve_fixture(visuals, complete=complete, frontier=frontier)
+            K, ksrc, states = resolve_fixture(visuals, mode=mode, frontier=frontier)
         else:
             K, _, states = tracker.update(visuals)
         ksrc = "tracked"
     else:
-        K, ksrc, states = resolve_fixture(visuals, fill_count, complete, frontier)
+        K, ksrc, states = resolve_fixture(visuals, fill_count, mode, frontier)
     ms = (time.perf_counter() - t0) * 1000
     pos = []
     for c, o, (final, why) in zip(crops, obs, states):
@@ -50,7 +52,7 @@ def inspect(img, src, pm, inspector, fill_count=None, plate=None, complete=False
                     "defect_score": o.score, "final_state": final,
                     "reason": o.reason if o.visual_state == "unknown" else (why or o.reason),
                     "vision_reason": o.reason, **o.features})
-    return {"frame": src, "K": K, "K_source": ksrc, "arm_px": arm, "offset_px": list(pm.offset),
+    return {"frame": src, "mode": mode, "K": K, "K_source": ksrc, "arm_px": arm, "offset_px": list(pm.offset),
             "inspector": inspector.name, "latency_ms": round(ms, 1), "positions": pos}
 
 
@@ -111,11 +113,11 @@ if __name__ == "__main__":
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--fill-count", type=int, help="offline metadata only"); g.add_argument("--k-from-events", action="store_true")
     g.add_argument("--track", action="store_true")
-    ap.add_argument("--complete", action="store_true"); ap.add_argument("--frontier", choices=("waiting", "unsure"), default="waiting")
+    ap.add_argument("--mode", choices=MODES, default=LIVE_FILL); ap.add_argument("--frontier", choices=("waiting", "unsure"), default="waiting")
     ap.add_argument("--persist", type=int)
     ap.add_argument("--debug", action="store_true"); ap.add_argument("--out", default=OUT)
     a = ap.parse_args()
-    tracker = SequenceTracker(a.persist or (1 if a.events else 2), a.complete, a.frontier) if a.track else None
+    tracker = SequenceTracker(a.persist or (1 if a.events else 2), a.mode, a.frontier) if a.track else None
     ix = R.Index(); pm = P.PositionMap(); insp = RuleInspector(); plate = pm.plate_mask()
     if a.run:
         R.check_allowed(a.run)
@@ -134,7 +136,7 @@ if __name__ == "__main__":
             res = inspect(img, src, pm, insp, fill_count=min(30, K0 + event - jobs[0][1]), plate=plate)
             res["K_source"] = "events"
         else:
-            res = inspect(img, src, pm, insp, a.fill_count, plate, a.complete, a.frontier, tracker)
+            res = inspect(img, src, pm, insp, a.fill_count, plate, a.mode, a.frontier, tracker)
         write(img, res, pm, out, a.debug)
         rows += prediction_rows(run, event, res)
         counts = {s: sum(p["final_state"] == s for p in res["positions"]) for s in COLORS}

@@ -6,15 +6,19 @@ order (G01..G30 = twin numbering = robot fill order; our own convention, not CSI
 Visual states (same terms as eval_metrics.py): pass | missing_cap | crooked_cap | damaged_vial | no_vial | unknown
 Process states: PASS | DEFECT | MISSED | WAITING | UNSURE
 
-The line provides NO placement count or order-complete signal (organizers, Oct 16), so the runtime decides from
-occupancy alone. F = the highest position that visibly holds a vial (the fill frontier):
+The manufacturing equipment provides NO placement count and NO order-complete signal (organizers, Oct 16), so the
+runtime decides from occupancy. F = the highest position that visibly holds a vial (the fill frontier).
+Two operating contexts (`mode`):
+  LIVE_FILL (default)  the fixture may still be filling.
     occupied           : pass -> PASS, cap/vial defect -> DEFECT
     unknown visual     : UNSURE (occluded, ambiguous)
     empty, i < F       : MISSED  (a later position is filled, so production has passed it)
-    empty, i > F       : MISSED  if complete=True (order declared finished; "A complete good order has 30 acceptable
-                                 vials", organizer Dataset 1 guide)
-                         i == F+1: frontier policy, WAITING (default) or UNSURE: not attempted yet vs just skipped
-                         WAITING otherwise
+    empty, i == F+1    : frontier policy, WAITING (default) or UNSURE: not attempted yet vs just skipped
+    empty, i > F+1     : WAITING (never MISSED while filling may continue)
+  FINAL_INSPECTION     the fixture is expected to be complete NOW. This context comes from OUTSIDE the line: the
+                       test protocol or an operator (e.g. a staged CSI Session B fixture), never from the equipment
+                       and never inferred from the image. A complete good order has 30 vials (organizer Dataset 1
+                       guide), so every empty position, trailing ones included, is MISSED.
 An unreadable position is flagged UNSURE on its own and never moves F: spreading UNSURE to every empty before it
 flagged 19 extra trailing positions on DEV runs 1-3 (crop-overlap ghosts of the rule baseline, Oct 16).
 SequenceTracker adds temporal history: an empty position latches to MISSED once a later position has stayed
@@ -30,6 +34,8 @@ DEFECT_VISUALS = {"missing_cap", "crooked_cap", "damaged_vial"}
 VISUAL_STATES = {"pass", "no_vial", "unknown"} | DEFECT_VISUALS
 FINAL_STATES = ("PASS", "DEFECT", "MISSED", "WAITING", "UNSURE")
 FRONTIER_POLICIES = ("waiting", "unsure")
+LIVE_FILL, FINAL_INSPECTION = "live_fill", "final_inspection"
+MODES = (LIVE_FILL, FINAL_INSPECTION)
 
 
 def check_fill_count(fill_count):
@@ -81,10 +87,17 @@ def infer_fill_count(visuals):
     return max((i for i, v in enumerate(check_visuals(visuals), 1) if occupied(v)), default=0)
 
 
-def _empty_after_frontier(i, F, complete, frontier):
+def check_mode(mode, frontier):
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
+    if frontier not in FRONTIER_POLICIES:
+        raise ValueError(f"frontier policy must be one of {FRONTIER_POLICIES}, got {frontier!r}")
+
+
+def _empty_after_frontier(i, F, mode, frontier):
     at = f"G{F:02d}" if F else "the start (no vial yet)"
-    if complete:
-        return "MISSED", f"order complete (30 vials) but empty after {at}"
+    if mode == FINAL_INSPECTION:
+        return "MISSED", f"final inspection (fixture declared complete by the test protocol/operator) but empty after {at}"
     if i == F + 1:
         why = f"fill frontier after {at}: not attempted yet or just skipped; resolves when a later position fills"
         return ("UNSURE" if frontier == "unsure" else "WAITING"), why
@@ -97,10 +110,9 @@ def _visual_state(visual):
     return ("PASS", "") if visual == "pass" else ("DEFECT", visual)
 
 
-def resolve_occupancy(visuals, complete=False, frontier="waiting"):
+def resolve_occupancy(visuals, mode=LIVE_FILL, frontier="waiting"):
     """Single frame, no placement count. Returns (F, [(state, reason), ...])."""
-    if frontier not in FRONTIER_POLICIES:
-        raise ValueError(f"frontier policy must be one of {FRONTIER_POLICIES}, got {frontier!r}")
+    check_mode(mode, frontier)
     visuals = check_visuals(visuals)
     F = infer_fill_count(visuals)
     out = []
@@ -110,17 +122,17 @@ def resolve_occupancy(visuals, complete=False, frontier="waiting"):
         elif i < F:
             out.append(("MISSED", f"empty before occupied G{F:02d}"))
         else:
-            out.append(_empty_after_frontier(i, F, complete, frontier))
+            out.append(_empty_after_frontier(i, F, mode, frontier))
     return F, out
 
 
-def resolve_fixture(visuals, fill_count=None, complete=False, frontier="waiting"):
+def resolve_fixture(visuals, fill_count=None, mode=LIVE_FILL, frontier="waiting"):
     """All 30 positions. Returns (K_or_F, source, [(state, reason), ...]); source is 'given' (count K: offline
     metadata or the camera's event counter) or 'occupancy' (runtime default: F from what is visible)."""
     if fill_count is not None:
         K = check_fill_count(fill_count)
         return K, "given", [resolve_state(i, K, v) for i, v in enumerate(check_visuals(visuals), 1)]
-    F, states = resolve_occupancy(visuals, complete, frontier)
+    F, states = resolve_occupancy(visuals, mode, frontier)
     return F, "occupancy", states
 
 
@@ -132,12 +144,11 @@ class SequenceTracker:
     vial. Empty positions below C are MISSED (latched); an empty position below a later vial that is not yet
     confirmed is UNSURE; a confirmed position that now reads empty is UNSURE (misread or removed vial)."""
 
-    def __init__(self, persist=2, complete=False, frontier="waiting"):
-        if not isinstance(persist, int) or persist < 1:
+    def __init__(self, persist=2, mode=LIVE_FILL, frontier="waiting"):
+        if isinstance(persist, bool) or not isinstance(persist, int) or persist < 1:
             raise ValueError(f"persist must be an int >= 1, got {persist!r}")
-        if frontier not in FRONTIER_POLICIES:
-            raise ValueError(f"frontier policy must be one of {FRONTIER_POLICIES}, got {frontier!r}")
-        self.persist, self.complete, self.frontier = persist, complete, frontier
+        check_mode(mode, frontier)
+        self.persist, self.mode, self.frontier = persist, mode, frontier
         self.streak = [0] * N_POSITIONS
         self.confirmed = [False] * N_POSITIONS
 
@@ -167,5 +178,5 @@ class SequenceTracker:
             elif i < F:
                 out.append(("UNSURE", f"empty before G{F:02d}, occupied for fewer than {self.persist} frames; awaiting confirmation"))
             else:
-                out.append(_empty_after_frontier(i, top, self.complete, self.frontier))
+                out.append(_empty_after_frontier(i, top, self.mode, self.frontier))
         return C, F, out

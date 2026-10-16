@@ -37,14 +37,42 @@ baseline. TAO Visual ChangeNet is an optional comparison only. Cosmos and Nemotr
 Runtime (laptop): cap_seal frame → arm-clear check → 30 crops → visual state → fill-order reasoning from occupancy
 (+ optional tracker, D021) → PASS / DEFECT / MISSED / WAITING / UNSURE operator map. No PLC connection.
 
+## Gatekeeper state (GPT review, Oct 16)
+- **RUN FROZEN ISAAC GATE WHEN COMPUTE ARRIVES.** The gate is independent of the training-data rule.
+- **Model training / real-data dose experiment: BLOCKED** until the organizer clarifies whether newly collected CSI
+  real data may be used for fitting, fine-tuning or calibration.
+- **Repository migration / push: BLOCKED** until Tom clarifies team ownership.
+
+## Evidence status
+- **Confirmed:**
+  - gate-v2.0.2 is frozen, and no valid Isaac render exists yet;
+  - runs 4–5 are protected;
+  - supplied real images are not training data;
+  - the organizer labeler is manual review, not ML autolabeling;
+  - the organizer grid convention matches our Twin G01–G30 orientation and order;
+  - the equipment provides no placement count or order-complete signal;
+  - CSI's numbering differs and is unavailable.
+- **Strong physical mapping evidence:** on a real 640×480 empty fixture, the twin-derived map found 30/30 holes at
+  about 1.68 px median, with no per-position manual teaching. This is the evidence that twin-derived geometry
+  substantially removes manual position teaching.
+- **Supporting evidence:** the organizer-grid consistency check (layout, orientation, numbering, topology only). It
+  is not an independent physical validation, because the organizer grid is 4 hand-placed corners plus interpolation,
+  and the twin map was aligned to those same corners.
+- **Unknown:** the exact Session A/B camera and feed; whether newly collected real data may be used for fitting or
+  calibration; final repository ownership after the team reassignment.
+
 ## Organizer facts (Oct 16, Derek Riley; guides read the same day)
 1. The plan direction is aligned. Confirm the training-data rule before any real-only or mixed training (D025).
 2. Dataset 1 now ships with full overhead G/S images, labeled and unlabeled crops, and coordinates/position IDs.
-   The release is **not on this Mac yet**; the link is in Slack `#dataset-1-vial-inspection`. It is 1920×1080, from a
-   view rotated about 3.6° from the 640×480 cap_seal frames.
+   The release is **not on this Mac yet**; the link is in Slack `#dataset-1-vial-inspection`. The labeling-tool
+   examples use a different 1920×1080 overhead view, rotated about 3.6° from the 640×480 cap_seal frames. CSI must
+   confirm which camera and resolution Session A/B will use. If it is the 1920×1080 view, the camera projection must
+   be solved for that view before the twin crop map is used; if it is 640×480 cap_seal, no re-solve is implied.
 3. NVIDIA vial labeler (`vial-labeler-participants-20261014.zip`, in Downloads): a **manual** review tool. No
    predictions, 1920×1080 only. Use it for human adjudication, never as ground truth on its own (D027).
-4. Twin map vs official grid: 30/30, 1.23 px median, no outliers, same G01–G30 rule (D024). The map is unchanged.
+4. Organizer-grid consistency check: the twin's topology, spacing, orientation and G01–G30 order are consistent with
+   the labeler's grid (30/30, 1.23 px median after aligning to its 4 corners). It is supporting evidence only (D024).
+   The map is unchanged.
 5. **No placement count or order-complete signal from the equipment.** The runtime uses occupancy plus history (D021).
 6. CSI's position numbering differs and is unavailable. **G01–G30 is our own twin convention** (D022).
 7. Crooked cap = any cap not fully seated. Our refinement: ≥ ~15–20° visible tilt or displacement; shallower is a
@@ -53,14 +81,18 @@ Runtime (laptop): cap_seal frame → arm-clear check → 30 crops → visual sta
 9. Extra recordings and test sessions: `#data-and-testbed-requests`, tag Shamar Webster. CSI must approve and supervise.
 10. Shamar administers the UWM GB10s, which may be accessed separately from Brev. Preflight: `GB10_PREFLIGHT.md`.
 11. `damaged_vial` is an official class. **Out of scope for v1** but still counted if seen (D026).
-12. A complete good order has 30 vials (Dataset 1 guide), so `--complete` marks trailing empties MISSED.
+12. A complete good order has 30 vials (Dataset 1 guide). `fill_state.py` has two contexts:
+    - **LIVE_FILL** (default): trailing empties are WAITING.
+    - **FINAL_INSPECTION** (`--mode final_inspection`): only when the test protocol or operator declares the fixture
+      complete; every empty position is MISSED. This is never an equipment signal (D021).
 
 ## Confirmed facts (engineering)
 - Scope: Good fixture G01–G30. The twin's S fixture has no hole map, so S is out of scope.
 - Twin: `G01–G30_tube` / `_cap` are separate editable prims. Defect states are authored as small USD override layers.
   Twin USD is the dimensional source of truth (D015).
-- Camera: the CapSealCam pipeline is reproduced (`capsealcam.py` = `apply_lens.py` to 0.001 px). The empty-fixture
-  hole check gives 30/30, 1.68 px median, from twin geometry alone (no hand-placed points).
+- Camera: the CapSealCam pipeline is reproduced (`capsealcam.py` = `apply_lens.py` to 0.001 px). The real 640×480
+  empty-fixture hole check gives 30/30, 1.68 px median, from twin geometry alone (no hand-placed points). This is the
+  main no-teach evidence.
 - Crooked caps (twin geometry): ~2 px at 10°, ~3 px at 15°, ~4–4.5 px at 20°, ~7 px at 30°. A level 5 mm lift is
   about 0.3 px. Confirm with known-angle CSI examples (D005, D006, D023).
 - Liquid: a simple coloured cylinder (D013). Real camera noise σ ≈ 2.7 gray levels.
@@ -78,8 +110,12 @@ Runtime (laptop): cap_seal frame → arm-clear check → 30 crops → visual sta
 DEV runs 1–3, laptop: real frame → twin map (+ DEV offset) → 30 crops → yellow-fraction rule → `fill_state.py` →
 operator states. `labels/dev_labels.csv` = DRAFT labels. Artifact versions are in `PROTOTYPE_SNAPSHOT.sha256`. Do not
 tune the rule. `rule_thresholds.json` was fitted on DEV draft labels, which is UNCLEAR under D025 (calibration).
-DEV sequence check (Oct 16): occupancy logic 31/32 defects, 14 false positives, 4 trailing false alarms; the
-event-count mode gives 32/32, 14, 4.
+DEV sequence check (Oct 16, LIVE_FILL, observation level; `ORGANIZER_UPDATE_2026-10-16.md` §4):
+- occupancy logic: recall 31/32; false positives 14/551 non-defect (2.5%); good-vial false rejects 10/112;
+  trailing-empty false alarms 4/439;
+- the event-count mode gives 32/32 with the same false positives;
+- by unique physical position-state, all 14 false positives come from 4 of 98 non-defect units;
+- events re-observe the same fixture, so no independent event-level rate exists.
 
 ## Isaac Sim appearance gate — **gate-v2.0.2, frozen, NOT run → INCONCLUSIVE**
 Question: are synthetic renders close enough to real cap_seal imagery for synthetic-first training to be credible?
@@ -90,7 +126,8 @@ Frozen on Oct 14 before any render (`GATE_v2.0.2.md`, `MANIFEST.sha256` 8 × OK)
 - no dataset, training, Cosmos or Nemotron first.
 
 Collect GPU, machine, Isaac version, settings, runtime, cost, renders, metrics, panels and verdict (PASS / PASS WITH
-WORK / FAIL / INCONCLUSIVE), then **STOP** for GPT review. Not on this Mac (no NVIDIA GPU).
+WORK / FAIL / INCONCLUSIVE), then **STOP** for GPT review. Not on this Mac (no NVIDIA GPU). The gate does not wait for
+the training-data answer: it is the next experiment as soon as authorized compute exists.
 
 ## Team (Oct 16)
 - Tom Hershberger is rebalancing UWM teams. **Noor moves from Team Ignite to Code Crusaders** (Challenge 1; Zara,
@@ -121,22 +158,25 @@ Team plan submitted and reviewed · Final submission Sun Nov 1 11:59 pm CT · Fi
 
 ## Known-working commands (in `twin_to_line/`)
 - `shasum -a 256 -c MANIFEST.sha256` → 8 × OK (gate-v2.0.2) · `shasum -a 256 -c PROTOTYPE_SNAPSHOT.sha256` → 4 × OK
-- `../.venv/bin/python -m pytest tests -q` → 67 passed · `../.venv/bin/python eval_metrics.py --selftest`
-- `../.venv/bin/python inspect_frame.py --run 1 --events [--track] [--complete] [--frontier unsure]` (DEV runs only)
-- `../.venv/bin/python validate_official_grid.py <labeler>/calibration.json --example <labeler>/examples/tray_000001.jpg`
+- `../.venv/bin/python -m pytest tests -q` → 69 passed · `../.venv/bin/python eval_metrics.py --selftest`
+- `../.venv/bin/python inspect_frame.py --run 1 --events [--track] [--mode live_fill|final_inspection] [--frontier unsure]` (DEV runs only)
+- `../.venv/bin/python check_organizer_grid.py <labeler>/calibration.json --example <labeler>/examples/tray_000001.jpg`
 - Gate on GPU: `GATE_v2.0.2.md` §11; GB10 first: `GB10_PREFLIGHT.md`.
 
 ## Open questions
 1. Training-data rule: the exact question is in `ORGANIZER_UPDATE_2026-10-16.md` §5. Noor sends it; it is not sent
    automatically.
-2. Which overhead camera and resolution will run in Session B (640×480 cap_seal or the 1920×1080 view)?
+2. CSI camera/feed: the exact question is in `ORGANIZER_UPDATE_2026-10-16.md` §5. It asks which physical camera and
+   resolution the Session A/B staging will use.
 3. Tom: which repository owns this work, and do the plans merge?
 4. Code Crusaders: their repo, plan, camera/view, model, training data, test discipline, compute, Isaac status.
 5. Download the Dataset 1 release from Slack to finish the class counts and the damaged-vial count.
 
 ## NEXT ACTION
-1. Noor: send the training-rule question (Derek or `#dataset-1-vial-inspection`), and ask which camera runs in
-   Session B.
-2. Wait for Tom's ownership answer before any push or migration.
-3. Engineering: run the frozen gate-v2.0.2 once when team compute (GB10 via Shamar, or Brev) exists. GB10 preflight
-   first. Nothing else is blocked on code.
+1. Engineering: **RUN FROZEN ISAAC GATE WHEN COMPUTE ARRIVES.** Run gate-v2.0.2 once, as frozen, on authorized team
+   compute (GB10 via Shamar, with the `GB10_PREFLIGHT.md` checks first, or Brev). Then STOP for GPT review. Model
+   training and the real-data dose experiment remain blocked until the organizer clarifies whether newly collected
+   CSI real data may be used for fitting, fine-tuning or calibration.
+2. Noor: send the two organizer questions (`ORGANIZER_UPDATE_2026-10-16.md` §5): the training-data rule and the
+   Session A/B camera/feed.
+3. Wait for Tom's ownership answer before any push, PR or migration.

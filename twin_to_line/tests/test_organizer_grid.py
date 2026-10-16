@@ -1,7 +1,7 @@
 import json, os, sys, unittest
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import validate_official_grid as V
+import check_organizer_grid as V
 
 # organizer calibration view_001, good tray (public numbers from the labeler's calibration.json / demo labels.json)
 GRID = [[750, 398], [1078, 406], [744, 710], [1067, 715]]

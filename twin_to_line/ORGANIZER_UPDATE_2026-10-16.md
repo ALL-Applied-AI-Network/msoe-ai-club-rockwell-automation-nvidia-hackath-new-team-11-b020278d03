@@ -4,6 +4,18 @@ What changed after Derek Riley (NVIDIA) reviewed the Team Ignite plan, what was 
 blocked. The Isaac appearance gate is still **gate-v2.0.2, frozen, not run; verdict INCONCLUSIVE** (no NVIDIA compute).
 Runs 4–5 were not opened.
 
+**Gatekeeper state (GPT review, Oct 16): RUN FROZEN ISAAC GATE WHEN COMPUTE ARRIVES.** The gate does not depend on
+the training-data rule. Model training and the real-data dose experiment remain blocked until the organizer clarifies
+whether newly collected CSI real data may be used for fitting, fine-tuning or calibration. Repository migration and
+push remain blocked until Tom clarifies team ownership.
+
+| Status | Items |
+| --- | --- |
+| Confirmed | gate-v2.0.2 frozen; no valid Isaac render yet; runs 4–5 protected; supplied real images are not training data; the organizer labeler is manual review, not ML autolabeling; the organizer grid convention matches our Twin G01–G30 orientation and order; no placement count or order-complete signal from the equipment; CSI numbering differs and is unavailable |
+| Strong physical mapping evidence | real 640×480 empty fixture: 30/30 holes, ~1.68 px median, no per-position manual teaching |
+| Supporting evidence | organizer-grid consistency check (section 3): layout, orientation, numbering, topology |
+| Unknown | the Session A/B camera and feed; whether newly collected real data may be used for fitting or calibration; final repository ownership after the team reassignment |
+
 ## Sources
 - Derek Riley's review of the submitted Team Ignite plan, relayed by Noor on Oct 16 (summarized in `HACKATHON_HANDOFF.md`).
 - Organizer guides, read Oct 16: the event overview `msoe-maic.com/library/?article=Rockwell-NVIDIA-Fall-2026`, Dataset 1
@@ -29,16 +41,20 @@ Everything below comes from the labeler package. Items marked BLOCKED need the r
 | 8 | Coordinate representation | Pixel centre per position, from **4 hand-placed tray-corner hole centres** per tray, bilinearly interpolated; crop box = centre + fixed offsets (good −38/−47/+42/+43; scrap −28/−34/+143/+96). The README calls the boxes "review context crops, not tight object boxes" |
 | 9 | Image dimensions | 1920×1080 only (the tool rejects anything else); two calibration profiles `view_001`, `view_122` (translation ≈ 2/18 px apart) |
 | 10 | Position-ID convention | Six columns of five; start at the top right, count down, then one column left; G = good, S = scrap |
-| 11 | Matches our G01–G30? | **Yes**: same rule, and the twin layout maps onto it with +3.6° rotation and no mirror or flip (section 3). CSI's internal numbering is still different and unavailable (D022) |
+| 11 | Matches our G01–G30? | **Yes**: same rule, and the organizer-grid consistency check shows the same orientation and order (+3.6° rotation, no mirror or flip; section 3). CSI's internal numbering is still different and unavailable (D022) |
 | 12 | `damaged_vial` meaning | Guide: "The target vial body is visibly damaged." Labeler: "crushed, torn, broken or visibly deformed". No confirmed example seen (section 7) |
 | 13 | Temporal duplication | Likely: "related public images 1 and 6" must be kept together. Splits must be by image group, not by crop |
 | 14 | Overlap with runs 4–5 | No evidence of overlap: different camera view (1920×1080, rotated about 3.6° and a different scale vs the 640×480 cap_seal frames), no timestamp overlay. The capture dates are unknown, so treat the release as a separate source; ask organizers before any evaluation claim |
 
-**Important view difference.** The release comes from a 1920×1080 overhead view of the same station. It is wider
-and rotated about 3.6° relative to the 640×480 cap_seal camera that the twin's `CapSealCam` (and our position map) was
-solved for. The guide says teams may not move or re-aim cameras, so the camera that will run during Session B must be
-confirmed. If it is the 1920×1080 view, the twin camera needs a re-solve for that view before runtime use. The frozen
-gate is unaffected: it compares renders with 640×480 cap_seal frames.
+**View difference.** The newly supplied organizer labeling-tool examples use a different 1920×1080 overhead view of
+the same station: wider, and rotated about 3.6° relative to the 640×480 cap_seal view that the twin's `CapSealCam`
+(and our position map) was solved for. **CSI must confirm which physical camera and resolution will be available for
+staged Session A/B capture**; nothing yet says which one it will be.
+- If CSI uses the existing 640×480 cap_seal view: the organizer release implies no camera re-solve.
+- If CSI uses the newer 1920×1080 view: the camera registration/projection must be solved for that physical view
+  before the twin-derived crop map is used. It is not being solved now, because the Session B camera is unknown.
+
+The frozen gate is unaffected either way: it compares renders with 640×480 cap_seal frames.
 
 `tray_000122` (my visual read, not labels) looks like a deliberately staged defect scene. G01, G14, G16 and G23 have
 strongly tilted or knocked-over caps. G04, G05, G13 and G22 are empty while later positions are filled. That makes it
@@ -66,14 +82,19 @@ the kind of scene our staged-session plan wanted.
   off the hole centre near the edges). The 4-corner bilinear grid ignores the lens's barrel distortion. Browser
   storage can be lost unless the JSON is exported.
 
-## 3. Twin map vs official coordinates (Task 3)
-`validate_official_grid.py` (validation only; `position_map_G.json` is read, never written).
+## 3. Organizer-grid consistency check (Task 3)
+`check_organizer_grid.py` (read-only; `position_map_G.json` is never written).
+
+**This is not an independent 30-point physical validation of the twin map.** The organizer tool builds its 30-position
+grid from 4 manually defined corner centres and interpolates the rest bilinearly. Our comparison aligns the frozen twin
+map to those same 4 corners, so the residuals measure how consistent the twin's layout is with the organizers'
+grid convention.
 
 The method was fixed before scoring:
 - The organizer centres come from the labeler's own bilinear formula.
-- A 4-DOF similarity (scale, rotation, translation) is fitted twin → official on the 4 tray corners only.
-- Those 4 corners are the only independently placed official points. The other 26 are interpolated, so agreement on
-  them tests layout shape, not 26 extra measurements.
+- A 4-DOF similarity (scale, rotation, translation) is fitted twin → organizer grid on the 4 tray corners.
+- The other 26 positions are interpolated by the organizer tool, so agreement there reflects layout shape, not 26
+  extra measurements.
 - Primary twin plane: `plate_hole_center_px`, because the labeler's rings mark the target insertion hole.
 
 | Profile | Matched | Scale | Rotation | Median | p90 | Max | Median ÷ scale (≈ cap_seal px) | Signed bias (dx, dy) | Outliers (> 5 px) |
@@ -85,21 +106,28 @@ The method was fixed before scoring:
 - Other twin planes are in the same range (median 1.22–1.67 px, max ≤ 4.94 px).
 - Numbering: no mirror needed and rotation +3.6°, so the conventions match. The unit tests show that a 180° or
   mirrored numbering is caught.
-- Overlays (gitignored): `results/official_grid/overlay_view_*.png`. They show the twin's G01–G30 crosses inside the
+- Overlays (gitignored): `results/organizer_grid/overlay_view_*.png`. They show the twin's G01–G30 crosses inside the
   organizer rings.
 
 **What this does and does not show.**
-- It confirms that the twin's fixture layout (hole spacing, row/column ratio 1.177 vs 1.178, and G01–G30 order)
-  agrees with the organizers' independent position grid to about 1–2 px in their 1920×1080 view.
-- It cannot test the absolute pixel accuracy of our 640×480 map, because that is a different camera.
-- The **no-manual-position-teaching claim still stands, on its existing evidence**: the twin map found 30/30 holes on
-  the empty real cap_seal fixture at 1.68 px median, with no hand-placed points.
-- Contrast: the organizer tool needed 4 hand-placed corners per tray, per view, plus an alignment reference image.
+- **Shows (supporting evidence):** the frozen twin fixture topology, spacing (row/column pitch ratio 1.177 vs 1.178),
+  orientation and G01–G30 ordering are highly consistent with the organizer labeling tool's grid convention.
+- **Does not show:** that organizer coordinates independently validate our physical position-map accuracy to 1.23 px.
+  The fit uses the organizers' own 4 corners, and the absolute accuracy of our 640×480 map cannot be tested in a
+  different camera's view.
+- **The main evidence for the no-teach claim is unchanged:** on a real 640×480 cap_seal image of the empty fixture,
+  the twin-derived map found 30/30 holes at about 1.68 px median error, with no manual per-position teaching. That is
+  why twin-derived geometry substantially removes manual position teaching. The consistency check supports layout,
+  orientation, numbering and topology only.
+- Contrast: the organizer tool needs 4 hand-placed corners per tray, per view, plus an alignment reference image.
 - The twin map was not changed.
 
 ## 4. Sequence logic without a placement count (Task 4)
-Derek: placement count and order-complete are not available from the equipment. `fill_state.py` now runs from
-occupancy, with optional temporal history (D021):
+Derek: placement count and order-complete are not available from the manufacturing equipment, so the runtime cannot
+know by itself that a fixture is complete. `fill_state.py` runs from occupancy, with optional temporal history, in two
+explicit operating contexts (D021, `mode=`):
+
+**LIVE_FILL** (default; the fixture may still be filling):
 - **MISSED**: an empty position before the highest visibly occupied position F (production has passed it).
 - **WAITING**: empty positions after F. The first one (F+1) is the ambiguous frontier, either not attempted yet or just
   skipped. The default is WAITING with a "fill frontier" reason; `frontier="unsure"` makes it UNSURE.
@@ -108,21 +136,41 @@ occupancy, with optional temporal history (D021):
 - **Temporal** (`SequenceTracker`): an empty position becomes MISSED once a later position has been occupied for
   `persist` valid frames (default 2, or 1 for event frames). Until then it is UNSURE, so a one-frame flicker never
   latches. A confirmed vial that later reads empty is UNSURE.
-- **Completed fixture** (`complete=True`): internal empties are MISSED, and trailing empties are also MISSED, because
-  "A complete good order has 30 acceptable vials" (Dataset 1 guide). Without `complete`, trailing empties stay WAITING.
-- A placement count K is optional offline metadata (synthetic scenes, staged ground truth) or the camera's own
-  classifier-free event counter (`events.py`, video only). It never comes from the equipment.
+- Example: G01–G08 occupied, G09 empty, G10 occupied → G09 = MISSED. But G01–G08 occupied and G09–G30 empty → G09 is
+  the frontier (WAITING) and the rest are WAITING. Nothing is promoted to MISSED while filling may continue.
 
-DEV check: runs 1–3, the rule baseline, 20 events, 583 draft-labeled position rows. Thresholds and labels are
-unchanged. This is not a holdout result.
+**FINAL_INSPECTION** (`mode="final_inspection"`, CLI `--mode final_inspection`): used only when the workflow or test
+protocol explicitly says "this fixture is now expected to be complete". In CSI Session B that context comes from the
+controlled staging protocol or the operator, never from the manufacturing equipment, and the system never infers it
+from the image. A complete good order has 30 vials (Dataset 1 guide), so every empty position, trailing ones
+included, is MISSED. There is no PLC or `order_complete` signal, and none is assumed.
 
-| Sequence mode | Defect recall | FN | FP | Trailing-empty false alarms |
+A placement count K is optional, in either context. It is offline metadata (synthetic scenes, staged ground truth)
+or the camera's own classifier-free event counter (`events.py`, video only), and never comes from the equipment.
+
+DEV check (LIVE_FILL): runs 1–3, the rule baseline, 20 events, 583 usable draft-labeled position observations (32
+defect, 551 non-defect: 112 pass + 439 trailing empties; 17 `usable=0` rows dropped by `eval_metrics`). Thresholds
+and labels are unchanged; this is reporting, not tuning, and not a holdout result. A false positive is a non-defect
+position flagged DEFECT, MISSED or UNSURE.
+
+| Sequence mode | Defect recall (obs.) | False positives / non-defect obs. | Good-vial false-reject rate | Trailing-empty false alarms |
 | --- | --- | --- | --- | --- |
-| `--k-from-events` (previous mode, video event count) | 32/32 | 0 | 14 | 4 |
-| occupancy only (new default) | 31/32 | 1 | 14 | 4 |
-| occupancy + tracker | 31/32 | 1 | 14 | 4 |
-| tracker, frontier = unsure | 31/32 | 1 | 26 | 16 |
-| first draft: UNSURE spread to every empty before an unreadable position | 31/32 | 1 | 33 | 23 |
+| `--k-from-events` (previous mode, video event count) | 32/32 | 14/551 = 2.5% | 10/112 = 8.9% | 4/439 = 0.9% |
+| occupancy only (new default) | 31/32 | 14/551 = 2.5% | 10/112 = 8.9% | 4/439 = 0.9% |
+| occupancy + tracker | 31/32 | 14/551 = 2.5% | 10/112 = 8.9% | 4/439 = 0.9% |
+| tracker, frontier = unsure | 31/32 | 26/551 = 4.7% | 10/112 = 8.9% | 16/439 = 3.6% |
+| first draft: UNSURE spread to every empty before an unreadable position | 31/32 | 33/551 = 6.0% | 10/112 = 8.9% | 23/439 = 5.2% |
+
+**Independence caveat.** Observations are not independent. Each event re-observes the whole fixture, so the same
+physical vial or empty hole appears in many events.
+- By unique physical position-state (run, position, ground-truth state), the default mode flags 4 of 98 non-defect
+  units at least once: 2 specular top-row caps (run 1 G06, G11) and 2 empty holes with a neighbour's displaced cap
+  intruding (run 1 G16, G20). They account for all 14 false-positive observations.
+- Defect units: 8 (7 cap-defect units + 1 missed placement). All 8 are flagged at least once, and 7 of 8 at every
+  observation.
+- Event-level false-alarm rate: 11 of 20 events contain at least one false alarm. Events within a run share the same
+  fixture, so this is not an independent-event rate. No reliable event-level independence can be computed from the
+  DEV data.
 
 - The last row is why unreadable positions no longer spread. On DEV that rule flagged 19 extra trailing positions
   behind crop-overlap ghosts. The change was made after seeing DEV results and is recorded here.
@@ -160,7 +208,11 @@ Exact organizer wording (read Oct 16):
 **BLOCKED — ORGANIZER CLARIFICATION REQUIRED** for A, B and C on newly collected data, and C on supplied data.
 Question for Noor to send (one message):
 
-> For Dataset 1, the guides say not to train on the supplied real images, while the Collect-and-Test page suggests comparing real-only, synthetic-only and combined training: may we train or fine-tune on real images we newly collect at CSI (5/10/20 staged defects), and may we calibrate decision thresholds on real development images, or must all model fitting and calibration be synthetic, with real images used only for development and evaluation?
+> For Dataset 1, the guides say not to train on the supplied real images, while the Collect-and-Test page suggests comparing real-only, synthetic-only and combined training. May we train or fine-tune on real images we newly collect at CSI (for example 5/10/20 staged defects), and may we calibrate decision thresholds on real development images, or must all model fitting and calibration be synthetic with real images used only for development and evaluation?
+
+Camera question for CSI (Noor sends it; also not sent automatically):
+
+> For our supervised Dataset 1 staging sessions, which physical camera/feed and resolution should we expect to use? Our existing twin registration is solved against the 640×480 cap_seal view, while the new organizer labeling-tool examples appear to use a different 1920×1080 overhead view.
 
 Consequences already visible:
 - D003's and D014's reliance on "any data mix is allowed" (Tanner, Oct 13) is superseded for supplied data (D025).
@@ -213,7 +265,7 @@ and a neighbour's displaced cap intruding into an empty crop.
 ## 10. Team reassignment impact (Noor → Code Crusaders, Oct 16)
 - **Portable unchanged:**
   - `positions.py`, `fill_state.py`, `eval_metrics.py`, `real_data.py` (data guards), `events.py`, `rules.py`,
-    `dose_sets.py`, `capsealcam.py`, `export_position_map.py`, `validate_official_grid.py`;
+    `dose_sets.py`, `capsealcam.py`, `export_position_map.py`, `check_organizer_grid.py`;
   - the gate kit as a unit (`MANIFEST.sha256` paths are relative);
   - `staging/`.
   These need numpy, OpenCV and the twin/data paths only.

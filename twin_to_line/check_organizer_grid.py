@@ -1,28 +1,31 @@
-"""Validate the twin G01-G30 layout against the organizers' position grid (NVIDIA vial labeler, Oct 14).
+"""Organizer-grid consistency check: twin G01-G30 layout vs the NVIDIA vial labeler's position grid (Oct 14).
 
-Validation only (D024): position_map_G.json is read, never written or tuned. The twin map stays the runtime /
-commissioning source; the organizer grid is an independent reference.
+Read-only (D024): position_map_G.json is read, never written or tuned; the twin map stays the runtime /
+commissioning source. NOT an independent 30-point physical validation: the organizer grid is 4 hand-placed corner
+centres plus bilinear interpolation, and the twin map is aligned to those same 4 corners. The result shows whether the
+twin's topology, spacing, orientation and G01-G30 order are consistent with the organizers' grid convention. Physical
+accuracy evidence stays the real 640x480 empty-fixture hole check (30/30, ~1.68 px median).
 
 The organizer grid belongs to a different camera view (1920x1080 fixed view, not the 640x480 cap_seal frames the
 twin map is projected for), so pixels cannot be compared directly. Method, fixed before scoring:
   1. official centres = the labeler's own bilinear interpolation of 4 hand-placed tray-corner centres
      (G01 top-right, G05 bottom-right, G26 top-left, G30 bottom-left). Only these 4 are independent measurements;
      the other 26 are interpolated from them, so interior agreement tests layout shape, not 26 extra measurements.
-  2. a 4-DOF similarity (scale, rotation, translation) is fitted on the 4 corners only, twin -> official.
+  2. a 4-DOF similarity (scale, rotation, translation) is fitted on the 4 corners only, twin -> organizer grid.
   3. residuals are reported for all 30 positions, in official-view px and divided by the fitted scale (~ cap_seal px).
 Primary plane: plate_hole_center_px (the labeler's circles mark the target insertion hole); the other twin planes
 are reported for transparency. Numbering check: the fit must need no mirror and |rotation| < 45 deg, otherwise the
 G01-G30 conventions differ (a 180-degree or mirrored numbering fits the same shape).
 OUTLIER_PX is in official-view px (pitch is ~66 px between columns).
 
-    python validate_official_grid.py <labeler>/calibration.json [--example <labeler>/examples/tray_000001.jpg] [--out DIR]
+    python check_organizer_grid.py <labeler>/calibration.json [--example <labeler>/examples/tray_000001.jpg] [--out DIR]
 """
 import argparse, json, os
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MAP_PATH = os.path.join(HERE, "position_map_G.json")
-OUT = os.path.join(HERE, "results", "official_grid")
+OUT = os.path.join(HERE, "results", "organizer_grid")
 PLANES = ("plate_hole_center_px", "hole_center_px", "tube_top_center_px", "cap_center_px")
 PRIMARY = "plate_hole_center_px"
 CORNERS = (1, 5, 26, 30)            # G01 top-right, G05 bottom-right, G26 top-left, G30 bottom-left
@@ -117,7 +120,7 @@ def overlay(img, res, path, scale=2):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="twin G01-G30 layout vs organizer position grid (validation only)")
+    ap = argparse.ArgumentParser(description="organizer-grid consistency check: twin G01-G30 layout vs organizer grid")
     ap.add_argument("calibration"); ap.add_argument("--example"); ap.add_argument("--out", default=OUT)
     a = ap.parse_args()
     pm, cal = json.load(open(MAP_PATH)), json.load(open(a.calibration))
@@ -130,7 +133,7 @@ def main():
     clean = {k: v for k, v in report.items() if k != "profiles"}
     clean["profiles"] = {pid: {pl: {k: v for k, v in r.items() if not k.startswith("_")} for pl, r in planes.items()}
                          for pid, planes in report["profiles"].items()}
-    json.dump(clean, open(os.path.join(a.out, "official_grid_report.json"), "w"), indent=1)
+    json.dump(clean, open(os.path.join(a.out, "organizer_grid_report.json"), "w"), indent=1)
     for pid, planes in report["profiles"].items():
         for pl in PLANES:
             r = planes[pl]; f = r["fit"]; m = r["residual_px_all30"]; c = r["residual_capseal_px_all30"]
@@ -146,7 +149,7 @@ def main():
         name = os.path.basename(a.example)
         prof = next((p["id"] for p in cal["profiles"] if p["reference_image"] == name), cal["profiles"][0]["id"])
         overlay(img, report["profiles"][prof][PRIMARY], os.path.join(a.out, f"overlay_{prof}_{os.path.splitext(name)[0]}.png"))
-    print(f"-> {a.out}/official_grid_report.json")
+    print(f"-> {a.out}/organizer_grid_report.json")
 
 
 if __name__ == "__main__":

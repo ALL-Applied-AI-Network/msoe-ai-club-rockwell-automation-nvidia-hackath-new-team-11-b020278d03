@@ -42,8 +42,28 @@ Expected at the end of the log: six `exit=0` lines and `DONE -> .../results.tar.
   sequence accuracy); `--selftest` checks it on mock predictions. No model, no training.
 - `real_splits.json` — which real runs are DEV vs HELD-OUT.
 - Earlier tools: `registration.py`, `tilt_sensitivity.py`, `twin_positions.py`, `overlay.py`.
+- `gen_scenes.py` + `configs/` — synthetic scene generator (not part of the frozen gate kit; see below).
 
 Twin note: the twin README says it was tested with Isaac Sim 6.0; `run_log.txt` records the version actually used.
+
+## Synthetic scenes (CPU only; scenes and labels, no renders)
+`gen_scenes.py` writes USD override layers over the untouched station (same mechanism as `make_variants.py`) for
+pass, missing_cap, no_vial (missed or waiting) and crooked_cap (rim-pivot tilt or lift), plus seated-cap offsets,
+leaning vials, lighting and material variation. Labels are read back from each composed stage and checked against
+the authored spec and physical rules (seat height, cap on its vial, vial inside its plate hole, no neighbour
+collisions). `labels.json` uses the gate schema, so `cut_crops.py` reads it. Not rendered; no transfer claim.
+```bash
+python gen_scenes.py ~/Downloads/csi_digital_twin/csi_digital_twin_v1 --selftest            # -> "selftest passed"
+python gen_scenes.py ~/Downloads/csi_digital_twin/csi_digital_twin_v1 out/smoke --config configs/smoke.json --seed 0
+python gen_scenes.py ~/Downloads/csi_digital_twin/csi_digital_twin_v1 out/sweep --config configs/tilt_sweep.json
+IGNITE_TWIN=~/Downloads/csi_digital_twin/csi_digital_twin_v1 python -m pytest tests/test_gen_scenes.py -q
+```
+- `smoke.json`: 300 scenes, pass / missing_cap / no_vial only, lighting + material variation (Oct 25 smoke test).
+- `tilt_sweep.json`: 130 scenes, crooked caps 5-40° in 8 world directions on a checkerboard, twin's own lights.
+- Scene `scene.usda` sublayers the station by relative path: generate on the machine that renders, or keep the
+  twin and output folders in the same relative layout.
+- Labels are physical truth ("any cap not fully seated" = crooked_cap). Visibility is reported, not assumed:
+  `cap_shift_px` / `cap_max_shift_px`, and `bbox_in_crop` (False when a crooked cap leaves the runtime crop box).
 
 ## Real-image prototype (DEV runs 1-3 only; laptop, no GPU)
 `real frame -> twin G01-G30 map (+ DEV offset) -> 30 crops -> rule inspector -> fill-order reasoning (occupancy, D021) -> PASS / DEFECT / MISSED / WAITING / UNSURE`

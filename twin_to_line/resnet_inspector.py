@@ -15,7 +15,7 @@ import argparse, hashlib, json, os
 import numpy as np
 import positions as P
 from rules import Inspector, Observation
-from train_resnet import CLASSES, DEFECTS, decide, to_tensor_array
+from train_resnet import CLASSES, DEFECTS, INPUT_PX, decide, to_tensor_array
 
 MODEL_DIR = os.path.join(P.HERE, "results", "train", "resnet18_v1")
 THRESHOLD_FILES = {"d038": "thresholds_d038.json", "preregistered": "thresholds.json"}
@@ -72,6 +72,12 @@ class ResNetInspector(Inspector):
 
     def inspect(self, crop):
         return self.inspect_batch([crop])[0]
+
+    def warmup(self, n=30):
+        """One throw-away batch of grey crops, so the first scored event does not pay the device start-up (~0.8 s, MPS)."""
+        x = self.torch.zeros((n, 3, INPUT_PX, INPUT_PX), device=self.device)
+        with self.torch.no_grad():
+            self.model(x).cpu()
 
     def info(self):
         return {"name": self.name, "threshold": self.which, "t_defect": self.t, "t_defect_preregistered": self.t_pre,

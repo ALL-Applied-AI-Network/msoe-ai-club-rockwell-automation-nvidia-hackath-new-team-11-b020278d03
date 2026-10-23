@@ -15,15 +15,19 @@ never writes into the image folder (R10).
 | grey | WAITING | empty hole after the last filled hole (not filled yet) |
 | orange | UNSURE | can't tell (displaced or partial cap, or a hole read empty that was filled before); goes to a person |
 
-The inspector is the rule baseline. Its `rule_thresholds.json` was fitted on DEV draft labels: it is a placeholder
-until the frozen inspector (step 7–9) replaces it.
+**Inspector** (`--inspector`, chosen at the freeze, step 9):
+- `rule` (default): the rule baseline. Its `rule_thresholds.json` was fitted on DEV draft labels (a placeholder).
+- `resnet`: the synthetic-only ResNet-18 v1 at the D038 threshold (`--threshold preregistered` gives the
+  pre-registered one). **G3 on DEV runs 1–3 was NO-GO** (87.7 % false alarms), so per the plan the rule baseline runs
+  live and the ResNet is scored offline as arm A (§5). Needs `results/train/resnet18_v1/` (gitignored, never
+  committed) and torch in `.venv`.
 
 ## 0. Before the session (Sunday dry run, then again Monday morning)
 1. **Version.** `git -C ~/code/ignite log -1 --oneline` should show the frozen commit/tag. After the freeze:
    `shasum -a 256 -c FREEZE.sha256` → every line `OK` (R11; that file is written at the freeze).
 2. **Tests.**
    `IGNITE_TWIN=~/Downloads/csi_digital_twin/csi_digital_twin_v1 ../.venv/bin/python -m pytest tests -q`
-   → `106 passed` (or the count in the freeze record).
+   → `125 passed` (or the count in the freeze record).
 3. **Replay folder** (once; 569 MB, stays in `results/`, never committed):
    `../.venv/bin/python live_inspect.py --export-replay 1 --out results/live/replay_run1`
    → `run 1: 1123 frames (video) -> results/live/replay_run1`
@@ -32,7 +36,8 @@ until the frozen inspector (step 7–9) replaces it.
    ../.venv/bin/python live_inspect.py --source replay:results/live/replay_run1 \
        --labels labels/dev_labels.csv --out results/live/dryrun_$(date +%Y%m%d_%H%M) --note "dry run"
    ```
-   Expect 18 lines from `event  1       cap_seal_video_1.mp4@t0000.0 K= 0 delay   4.0s  WAITING=30` to
+   Expect `inspector rule_yellow_seat  rule_thresholds.json 322c29ec2ea9`, then 18 lines from
+   `event  1       cap_seal_video_1.mp4@t0000.0 K= 0 delay   4.0s  WAITING=30` to
    `event 18       cap_seal_video_1.mp4@t1050.0 K=17 delay   4.0s  MISSED=1 PASS=10 UNSURE=7 WAITING=12`, then
    `1123 frames, 18 events, {'settling': 75, 'scored': 18, 'unchanged': 964, 'arm': 66} -> results/live/dryrun_…`
 5. **Outputs readable:** `../.venv/bin/python eval_metrics.py <dryrun dir>/predictions.csv --labels labels/dev_labels.csv`
@@ -53,7 +58,9 @@ until the frozen inspector (step 7–9) replaces it.
    ../.venv/bin/python live_inspect.py --source folder:"$IN" --out "$OUT" --note "CSI live run, Oct 26"
    ```
 2. **Expected:**
-   - Nothing is printed until the first event.
+   - One line names the inspector and its file hash, e.g. `inspector rule_yellow_seat  rule_thresholds.json
+     322c29ec2ea9`; with `--inspector resnet`: `inspector resnet18_synth_v1[d038] t=0.50224 (pre-registered 0.99968)
+     on mps  results/train/resnet18_v1/model.pt 8380851f8b4e`. Then nothing until the first event.
    - Within ~2 s, `$OUT` contains `overlays/`, `predictions.csv`, `session.json` and `trial_log.csv`.
    - In `session.json`, `"git"` is the frozen commit **without** `+modified`.
 3. **Watch the log** in a second terminal: `tail -f "$OUT/trial_log.csv" | cut -d, -f6,8`. Each new image adds one
@@ -92,6 +99,9 @@ until the frozen inspector (step 7–9) replaces it.
 | `ProtectedDataError: N protected frame(s) in DIR` (replay only; nothing was processed) | The folder holds dataset frames from runs 4–5 or unassigned | Stop; don't open or move them; use the right folder; tell Noor |
 | `can't open file ... live_inspect.py` | Not in the project folder | `cd ~/code/ignite/twin_to_line`; start again |
 | A traceback at start naming `rule_thresholds.json` or `position_map_G.json` | A file is missing from this checkout | Check the version and hashes (§0.1); don't run until they match the freeze |
+| `FileNotFoundError: ... results/train/resnet18_v1/run.json` (`--inspector resnet`; no `OUT` created) | The model folder isn't on this Mac (gitignored) | Copy it back from the backup and check its hashes against the freeze record; or run `--inspector rule` |
+| `ValueError: ... model.pt does not match the sha256 recorded in run.json` | The model file was changed or damaged | Don't run the ResNet; restore the folder from the backup |
+| `ModuleNotFoundError: No module named 'torch'` | `.venv` lacks torch | `../.venv/bin/pip install torch torchvision` before the session (not on the day); or run `--inspector rule` |
 | Status `unreadable` | The image can't be decoded (corrupt, or still incomplete after 3 s) | One-off: note it, keep going. Every image: the copy route is broken → Ctrl-C, check with CSI |
 | Status `wrong_size` (note says e.g. `1920x1080, expected 640x480`) | The camera isn't the 640×480 view the position map is built for | Ctrl-C. Do **not** resize by hand; the 1920×1080 map (plan step 5) is needed |
 | Status `refused` | A dataset holdout frame (runs 4–5) arrived in the folder | Ctrl-C; take that folder out of use; tell Noor |
@@ -106,9 +116,10 @@ until the frozen inspector (step 7–9) replaces it.
   They are scored once, after the freeze (plan step 11).
 - Keep them in their own folder that is **never** `IN`. While staging, `live_inspect.py` is stopped or watching a
   different folder.
-- Scoring later (step 11), after the labels are locked:
-  `../.venv/bin/python live_inspect.py --source replay:<staged dir> --gate each --out results/live/sealed_<arm>`.
-  `--gate each` scores every arm-clear image (one image per setup).
+- Scoring later (step 11), after the labels are locked, once per arm:
+  `../.venv/bin/python live_inspect.py --source replay:<staged dir> --gate each --inspector <rule|resnet> --out results/live/sealed_<arm>`.
+  `--gate each` scores every arm-clear image (one image per setup). For the ResNet, also run
+  `--threshold preregistered` into its own `OUT` and report it next to the D038 result.
 
 ## 6. Open before the freeze
 - CSI: camera resolution (640×480 assumed here) and how images reach the laptop (shared folder or CSI PC); both
@@ -117,4 +128,5 @@ until the frozen inspector (step 7–9) replaces it.
   modification time is used).
 - An on-screen operator window that refreshes itself (today: the overlay file only).
 - The frozen inspector and thresholds (R4); the full robustness tests (R8); the freeze record and hashes (R11).
-- Measured on this Mac (DEV run 1 replay): median 27.5 ms per scored image, 1.3 ms per other image (R7 target ≤ 1 s).
+- Measured on this Mac (DEV run 1 replay): rule median 27 ms per scored image, ResNet (MPS) 74 ms; 1.3 ms per other
+  image (R7 target ≤ 1 s). ResNet start-up (torch, model load, warm-up) takes about 2.5 s before its first line.

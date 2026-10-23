@@ -1,4 +1,4 @@
-import csv, os, sys, tempfile, threading, time, unittest
+import csv, os, sys, tempfile, threading, time, unittest, unittest.mock
 from datetime import datetime, timedelta
 import cv2, numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -15,6 +15,14 @@ PM = P.PositionMap()
 YELLOW = (0, 220, 230)                                   # BGR, inside the cap HSV range
 T0 = datetime(2026, 10, 26, 13, 0, 0)
 DEV = os.path.exists(os.path.join(R.REAL_ROOT, "image_index.csv"))
+MODEL_DIR = os.path.join(P.HERE, "results", "train", "resnet18_v1")
+RENDERS = os.path.join(P.HERE, "results", "train_v1", "data_train", "renders")
+G3_D038 = os.path.join(P.HERE, "results", "g3", "resnet18_v1", "predictions_resnet_d038.csv")
+try:
+    import torch  # noqa: F401
+    HAVE_MODEL = os.path.exists(os.path.join(MODEL_DIR, "thresholds_d038.json"))
+except ImportError:
+    HAVE_MODEL = False
 
 
 def fixture(filled=(), half=(), arm=False):
@@ -236,6 +244,38 @@ class DataGuard(unittest.TestCase):
         self.assertNotIn("refused", st[2:])                                      # DEV and external frames pass
 
 
+@unittest.skipUnless(HAVE_MODEL and os.path.isdir(RENDERS), "needs torch, results/train/resnet18_v1 and the train_v1 renders")
+class ResNetSession(unittest.TestCase):
+    """The ResNet inspector in a live session, on synthetic renders only (640x480, gate 'each')."""
+
+    def test_session_scores_and_logs_model_provenance(self):
+        import json
+        from resnet_inspector import sha256 as file_sha
+        insp = L.make_inspector("resnet", device="cpu", quiet=True)
+        s, out = session("each", inspector=insp)
+        renders = sorted(f for f in os.listdir(RENDERS) if f.endswith(".png") and "_pinhole" not in f)[:2]
+        rows = [s.process_frame(name(k), cv2.imread(os.path.join(RENDERS, f))) for k, f in enumerate(renders)]
+        s.close()
+        self.assertEqual([r["status"] for r in rows], ["scored", "scored"])
+        self.assertEqual({r["model_sha256"] for r in rows}, {file_sha(os.path.join(MODEL_DIR, "model.pt"))})
+        self.assertEqual({r["inspector"] for r in rows}, {"resnet18_synth_v1[d038]"})
+        info = json.load(open(os.path.join(out, "session.json")))["inspector"]
+        self.assertEqual(info["t_defect"], insp.t_d038); self.assertEqual(info["t_defect_preregistered"], insp.t_pre)
+        self.assertEqual(len(info["files"]), 3)
+        preds = read_csv(os.path.join(out, "predictions.csv"))
+        self.assertEqual(len(preds), 60); self.assertEqual({p["cap_frac"] for p in preds}, {""})
+        self.assertTrue(all(0 <= float(p["defect_score"]) <= 1 for p in preds))
+        M.evaluate([dict(p, ground_truth="pass", gt_sequence="") for p in preds])     # eval_metrics reads the schema
+
+    def test_arm_frame_never_reaches_the_model(self):                            # R3 with the ResNet
+        insp = L.make_inspector("resnet", device="cpu", quiet=True)
+        s, _ = session("each", inspector=insp)
+        with unittest.mock.patch.object(insp, "probabilities", side_effect=AssertionError("model called")):
+            r = s.process_frame(name(0), fixture(filled=range(1, 6), arm=True))
+        s.close()
+        self.assertEqual(r["status"], "arm")
+
+
 @unittest.skipUnless(DEV, "needs the DEV cap_seal dataset")
 class DevReplay(unittest.TestCase):
     """DEV runs 1-3 replayed frame by frame (in memory; same Session.process_frame as the file sources)."""
@@ -243,16 +283,24 @@ class DevReplay(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        ix = R.Index(); cls.res = {}
+        ix = R.Index(); cls.res, cls.resnet = {}, {}
+        insp = L.make_inspector("resnet", quiet=True) if HAVE_MODEL else None    # fed the same frames, after G3 only
         for run, src in cls.EVENTS.items():
             s, out = session("events", ix=ix)
+            sr = session("events", ix=ix, inspector=insp) if insp else None
             if src == "video":
                 stream = ((R.video_id(run, t), t, img) for t, img in R.iter_video(ix.video_path(run), 1.0))
             else:
                 fr = ix.frames(run); t0 = ix.time_of[fr[0]]
                 stream = ((f, (ix.time_of[f] - t0).total_seconds(), ix.load(f)) for f in fr)
-            rows = [s.process_frame(n, img, t) for n, t, img in stream]
+            rows = []
+            for n, t, img in stream:
+                rows.append(s.process_frame(n, img, t))
+                if sr:
+                    sr[0].process_frame(n, img, t)
             s.close(); cls.res[run] = (rows, out)
+            if sr:
+                sr[0].close(); cls.resnet[run] = sr[1]
 
     def test_every_frame_in_order_events_match_the_labeled_events(self):         # R1, R3
         for run, src in self.EVENTS.items():
@@ -276,6 +324,18 @@ class DevReplay(unittest.TestCase):
             ref = inspect(IF.load(ix, r["event_frame"]), r["event_frame"], pm, insp)   # inspect_frame's cached event frames
             live = {p["position"]: p["final_state"] for p in preds if p["frame"] == r["event_frame"]}
             self.assertEqual(live, {p["position"]: p["final_state"] for p in ref["positions"]}, r["event_frame"])
+
+    @unittest.skipUnless(HAVE_MODEL and os.path.exists(G3_D038), "needs the ResNet and the G3 result")
+    def test_resnet_live_replay_equals_the_g3_run(self):
+        """Live (online events, frames decoded in memory) == g3_check.py (stored event frames): same frames, states."""
+        g3 = {(r["frame"], r["position"]): r for r in read_csv(G3_D038)}
+        for run, out in self.resnet.items():
+            live = read_csv(os.path.join(out, "predictions.csv"))
+            self.assertEqual({p["frame"] for p in live}, {k[0] for k, r in g3.items() if r["run"] == run}, run)
+            for p in live:
+                ref = g3[(p["frame"], p["position"])]
+                self.assertEqual((p["predicted_state"], p["final_state"]), (ref["predicted_state"], ref["final_state"]))
+                self.assertAlmostEqual(float(p["defect_score"]), float(ref["defect_score"]), places=3)
 
 
 if __name__ == "__main__":

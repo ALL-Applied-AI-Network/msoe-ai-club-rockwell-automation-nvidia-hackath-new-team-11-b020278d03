@@ -3,6 +3,7 @@ fill-sequence state (LIVE_FILL, D021) -> predictions CSV + trial log + operator 
 
     python live_inspect.py --source replay:DIR [--labels labels/dev_labels.csv] [--out DIR]
     python live_inspect.py --source folder:DIR [--poll 0.25] [--idle-exit S]
+        [--inspector rule|resnet] [--threshold d038|preregistered] [--model-dir DIR] [--device mps|cpu]
     python live_inspect.py --export-replay 1 --out results/live/replay_run1 [--from video|stills] [--step 1.0]
 
 Sources (one code path after decoding: Session.process_frame):
@@ -26,7 +27,11 @@ Outputs in --out (default results/live/<UTC time>):
   session.json        configuration, code / thresholds / map hashes, counts
 Data rule (D011): a frame that is in the dataset index but not in DEV runs 1-3 is refused, so runs 4-5 are never
 processed; images from outside the dataset (staged / live captures) are accepted.
-The rule baseline's rule_thresholds.json was fitted on DEV draft labels: a plumbing placeholder, not a scored arm.
+Inspectors (--inspector):
+  rule (default)  rule baseline; rule_thresholds.json was fitted on DEV draft labels (a placeholder, not a scored arm)
+  resnet          synthetic-only ResNet-18 v1 (resnet_inspector.py), threshold D038 (default) or the pre-registered one.
+                  G3 on DEV runs 1-3 was NO-GO (87.7 % false positives at D038), so per the plan the rule baseline
+                  runs live and the ResNet is scored offline as arm A; the step-9 choice is Noor's.
 """
 import argparse, csv, hashlib, json, os, re, shutil, subprocess, time
 from collections import Counter
@@ -38,13 +43,14 @@ import events as E
 from eval_metrics import gt_final
 from fill_state import SequenceTracker, LIVE_FILL, MODES
 from inspect_frame import inspect, annotate, prediction_rows, safe
-from rules import RuleInspector, THRESHOLDS
+from rules import RuleInspector
 
 IMAGE_EXT = (".png", ".jpg", ".jpeg")
 STILL_RE = re.compile(r"(\d{8})_(\d{6})_(\d{6})")
 FLAGGED = ("DEFECT", "MISSED", "UNSURE")
 RUNTIME_FILES = ("live_inspect.py", "inspect_frame.py", "positions.py", "fill_state.py", "rules.py", "events.py",
-                 "real_data.py", "position_map_G.json", "registration_dev.json", "rule_thresholds.json")
+                 "real_data.py", "position_map_G.json", "registration_dev.json", "rule_thresholds.json",
+                 "resnet_inspector.py", "train_resnet.py")
 PRED_FIELDS = ["run", "event", "frame", "position", "predicted_state", "defect_score", "pred_sequence", "final_state",
                "K", "K_source", "cap_frac", "cap_offset", "reason"]
 IDS = [f"G{i:02d}" for i in range(1, 31)]
@@ -227,16 +233,15 @@ class Session:
         self.ix = dataset_index() if ix == "auto" else ix
         self.expected = expected_states(labels) if labels else {}
         self.name = os.path.basename(os.path.normpath(out))
-        self.git, self.model_sha = code_version(), sha256(THRESHOLDS)
+        insp_info = self.insp.info()                    # model sha in the trial log = the inspector's first file
+        self.git, self.model_sha = code_version(), next(iter(insp_info["files"].values()), "")
         self.events, self.counts, self.latency, self.stop_reason = 0, Counter(), [], "end of source"
         os.makedirs(os.path.join(out, "overlays"), exist_ok=True)
         self.preds = CsvLog(os.path.join(out, "predictions.csv"), PRED_FIELDS)
         self.trial = CsvLog(os.path.join(out, "trial_log.csv"), TRIAL_FIELDS)
         self.info = {"session": self.name, "started_utc": self.now(), "source": source, "gate": gate, "mode": mode,
                      "track": track, "run_id": run_id, "labels": labels, "note": note, "git": self.git,
-                     "inspector": {"name": self.insp.name, "thresholds": os.path.relpath(THRESHOLDS, P.HERE),
-                                   "sha256": self.model_sha, "status": "fitted on DEV draft labels: plumbing placeholder, "
-                                                                       "not a scored arm"},
+                     "inspector": insp_info,
                      "position_map": {"file": os.path.relpath(P.MAP_PATH, P.HERE), "sha256": sha256(P.MAP_PATH),
                                       "image_size": list(self.pm.size), "offset_px": list(self.pm.offset),
                                       "offset_source": self.pm.offset_source},
@@ -322,6 +327,22 @@ class Session:
             print(f"{sum(self.counts.values())} frames, {self.events} events, {dict(self.counts)} -> {self.out}")
 
 
+def make_inspector(kind="rule", threshold="d038", model_dir=None, device=None, quiet=False):
+    """The inspector for a session, loaded (and, for the ResNet, warmed up) before the first frame arrives."""
+    if kind == "rule":
+        insp = RuleInspector()
+    else:
+        from resnet_inspector import MODEL_DIR, ResNetInspector
+        insp = ResNetInspector(model_dir or MODEL_DIR, threshold, device)
+        insp.warmup()
+    if not quiet:
+        i = insp.info(); f, h = next(iter(i["files"].items()), ("", ""))
+        extra = (f" t={i['t_defect']:.5f} (pre-registered {i['t_defect_preregistered']:.5f}) on {insp.device}"
+                 if kind == "resnet" else "")
+        print(f"inspector {i['name']}{extra}  {f} {h[:12]}")
+    return insp
+
+
 def run(session, frames):
     """Feed every (path, image) of a source through the session; Ctrl-C stops cleanly with all logs flushed."""
     try:
@@ -356,6 +377,10 @@ if __name__ == "__main__":
     ap.add_argument("--note", default="")
     ap.add_argument("--export-replay", metavar="RUN"); ap.add_argument("--from", dest="from_", choices=("video", "stills"), default="video")
     ap.add_argument("--step", type=float, default=1.0)
+    ap.add_argument("--inspector", choices=("rule", "resnet"), default="rule")
+    ap.add_argument("--threshold", choices=("d038", "preregistered"), default="d038", help="ResNet threshold (D038)")
+    ap.add_argument("--model-dir", help="ResNet run folder (default results/train/resnet18_v1)")
+    ap.add_argument("--device", help="ResNet device (default mps if available, else cpu)")
     a = ap.parse_args()
     if a.export_replay:
         if not a.out:
@@ -368,4 +393,5 @@ if __name__ == "__main__":
         ix = dataset_index()
         frames = replay(folder, ix) if kind == "replay" else watch(folder, a.poll, a.idle_exit)
         out = a.out or os.path.join(P.HERE, "results", "live", datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
-        run(Session(out, a.source, a.run_id, a.gate, a.mode, a.track, a.labels, a.note, ix=ix), frames)
+        insp = make_inspector(a.inspector, a.threshold, a.model_dir, a.device)
+        run(Session(out, a.source, a.run_id, a.gate, a.mode, a.track, a.labels, a.note, ix=ix, inspector=insp), frames)

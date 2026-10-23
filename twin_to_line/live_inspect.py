@@ -5,6 +5,7 @@ fill-sequence state (LIVE_FILL, D021) -> predictions CSV + trial log + operator 
     python live_inspect.py --source folder:DIR [--poll 0.25] [--idle-exit S]
         [--inspector rule|resnet] [--threshold d038|preregistered] [--model-dir DIR] [--device mps|cpu]
     python live_inspect.py --export-replay 1 --out results/live/replay_run1 [--from video|stills] [--step 1.0]
+    python live_inspect.py --preflight PKG/preflight --out DIR      (GB10 package self-check, LIVE_RUNBOOK.md section 7)
 
 Sources (one code path after decoding: Session.process_frame):
   replay:DIR  every image in DIR in frame-time order, as fast as it runs
@@ -38,8 +39,11 @@ Inspectors (--inspector):
   resnet          synthetic-only ResNet-18 v1 (resnet_inspector.py), threshold D038 (default) or the pre-registered one.
                   G3 on DEV runs 1-3 was NO-GO (87.7 % false positives at D038), so per the plan the rule baseline
                   runs live and the ResNet is scored offline as arm A; the step-9 choice is Noor's.
+Preflight (--preflight): prints OS, CPU, glibc, Python, numpy / OpenCV versions and the sha256 of every runtime file,
+then scores the package's bundled frames (the 1080 still, 10 DEV run-1 event frames at 640 and as 1080 copies) with
+--gate each and compares every hole with the Mac's predictions shipped next to them. Exit 0 = PREFLIGHT OK.
 """
-import argparse, csv, hashlib, json, os, re, shutil, subprocess, time
+import argparse, csv, hashlib, json, os, re, shutil, subprocess, sys, time
 from collections import Counter
 from datetime import datetime, timezone
 import cv2, numpy as np
@@ -65,6 +69,8 @@ TRIAL_FIELDS = (["time_utc", "session", "git", "inspector", "model_sha256", "inp
                  "event", "event_frame", "event_delay_s", "K", "n_flagged", "n_differ_from_expected", "latency_ms"]
                 + [f"pred_{p}" for p in IDS] + [f"exp_{p}" for p in IDS] + ["path", "note", "intervention"])
 PATH_640, PATH_1080 = "640", "1080->640"
+ARCHIVE_COMMIT = os.path.join(P.HERE, "ARCHIVE_COMMIT")      # filled in by `git archive` (export-subst)
+PREFLIGHT_SETS = (("still_1080", PATH_1080), ("run1_640", PATH_640), ("run1_1080", PATH_1080))
 
 
 def sha256(path):
@@ -73,12 +79,17 @@ def sha256(path):
 
 
 def code_version():
-    """Short git sha, '+modified' when a runtime source file differs from HEAD (others, e.g. dose_sets.py, ignored)."""
+    """Short git sha, '+modified' when a runtime source file differs from HEAD (others, e.g. dose_sets.py, ignored).
+    Without git (a `git archive` package): the archived commit, '<sha> (archive)'; the preflight prints file hashes."""
     try:
         g = lambda *a: subprocess.run(["git", "-C", P.HERE, *a], capture_output=True, text=True, check=True).stdout.strip()
         return g("rev-parse", "--short", "HEAD") + ("+modified" if g("status", "--porcelain", "--", *RUNTIME_FILES) else "")
     except (OSError, subprocess.CalledProcessError):
-        return "unknown"
+        try:
+            c = open(ARCHIVE_COMMIT).read().strip()
+            return "unknown" if not c or c.startswith("$Format") else f"{c[:7]} (archive)"
+        except OSError:
+            return "unknown"
 
 
 def frame_id(path):
@@ -371,6 +382,54 @@ def run(session, frames):
         session.close()
 
 
+def environment():
+    import importlib.util, platform
+    try:
+        osr = dict(l.rstrip("\n").split("=", 1) for l in open("/etc/os-release") if "=" in l)
+    except OSError:
+        osr = {}
+    return {"os": osr.get("PRETTY_NAME", "").strip('"') or platform.platform(), "kernel": platform.release(),
+            "arch": platform.machine(), "glibc": " ".join(platform.libc_ver()).strip() or "n/a",
+            "python": f"{platform.python_version()} ({sys.executable})", "numpy": np.__version__, "opencv": cv2.__version__,
+            "torch": "installed, not used" if importlib.util.find_spec("torch") else "not installed (not needed)"}
+
+
+def score_folder(folder, out):
+    """Every image in folder scored on its own (--gate each, no tracker, no dataset index). Returns (predictions, trial log)."""
+    run(Session(out, f"replay:{folder}", gate="each", ix=None, quiet=True), replay(folder))
+    rd = lambda n: list(csv.DictReader(open(os.path.join(out, n), newline="")))
+    return rd("predictions.csv"), rd("trial_log.csv")
+
+
+def preflight(data, out):
+    """Package self-check: environment and runtime file hashes, then every bundled set scored and compared hole by hole
+    with the Mac's predictions (data/expected/<set>.csv). True when every set matches."""
+    env = {**environment(), "code": code_version()}
+    for k, v in env.items():
+        print(f"{k:8s} {v}")
+    hashes = {f: sha256(os.path.join(P.HERE, f)) for f in RUNTIME_FILES}
+    for f, h in hashes.items():
+        print(f"sha256   {h}  {f}")
+    ok, sets = True, {}
+    for name, path in PREFLIGHT_SETS:
+        preds, trial = score_folder(os.path.join(data, name), os.path.join(out, name))
+        exp = {(r["frame"], r["position"]): r for r in csv.DictReader(open(os.path.join(data, "expected", name + ".csv"), newline=""))}
+        got = {(r["frame"], r["position"]): r for r in preds}
+        differ = [k for k in exp if k not in got or (got[k]["predicted_state"], got[k]["final_state"]) != (exp[k]["predicted_state"], exp[k]["final_state"])]
+        dmax = max((abs(float(got[k]["defect_score"]) - float(exp[k]["defect_score"])) for k in exp if k in got), default=float("nan"))
+        st, paths = Counter(r["status"] for r in trial), {r["path"] for r in trial}
+        good = not differ and set(got) == set(exp) and set(st) == {"scored"} and paths == {path}
+        ok &= good
+        sets[name] = {"frames": len(trial), "holes": len(got), "final_states": dict(Counter(r["final_state"] for r in preds)),
+                      "differ_from_mac": [list(k) for k in differ], "max_score_diff": dmax, "statuses": dict(st),
+                      "paths": sorted(paths), "ok": good}
+        print(f"{name:10s} {len(trial):2d} frames, path {'/'.join(sorted(paths))}, {dict(Counter(r['final_state'] for r in preds))}; "
+              f"vs Mac: {len(differ)} holes differ, max |score diff| {dmax:.2g} -> {'OK' if good else 'FAIL'}")
+    json.dump({"environment": env, "sha256": hashes, "sets": sets, "ok": ok}, open(os.path.join(out, "preflight.json"), "w"), indent=1)
+    print("PREFLIGHT OK" if ok else "PREFLIGHT FAILED", f"-> {os.path.join(out, 'preflight.json')}")
+    return ok
+
+
 def export_replay(run_id, out, source="video", step=1.0):
     """A DEV run as a replay folder: video frames every `step` s (PNG, named by video frame id) or the run's stills
     (copied unchanged). Runs 4-5 are refused by real_data."""
@@ -398,7 +457,10 @@ if __name__ == "__main__":
     ap.add_argument("--threshold", choices=("d038", "preregistered"), default="d038", help="ResNet threshold (D038)")
     ap.add_argument("--model-dir", help="ResNet run folder (default results/train/resnet18_v1)")
     ap.add_argument("--device", help="ResNet device (default mps if available, else cpu)")
+    ap.add_argument("--preflight", metavar="DIR", help="package self-check on the bundled frames in DIR")
     a = ap.parse_args()
+    if a.preflight:
+        sys.exit(0 if preflight(a.preflight, a.out or os.path.join(P.HERE, "results", "preflight")) else 1)
     if a.export_replay:
         if not a.out:
             ap.error("--export-replay needs --out")

@@ -1,7 +1,8 @@
 # Live runbook: `live_inspect.py`
-Draft for the Sunday dry run (plan §2.5 R9). The software is **not frozen yet**. The CSI camera resolution and how
-image files reach the laptop are **not confirmed yet** (§6). All commands run on Noor's Mac in
-`~/code/ignite/twin_to_line`.
+Draft for the Sunday dry run (plan §2.5 R9). The software is **not frozen yet**. §0–§5 run on Noor's Mac in
+`~/code/ignite/twin_to_line`; **Monday runs on CSI's GB10 from the package: §7.** The camera streams 1920×1080 (and
+320×240); 1920×1080 frames are warped into the DEV 640×480 grid and then follow the same path (D039). How image files
+reach our process is **not confirmed yet** (§6).
 
 **What it does:** it reads image files from a folder. Each time the fixture is still for 4 s with the arm away, it
 gives all 30 holes (G01–G30) a state and logs every image it saw. It connects to no PLC, robot or plant network, and it
@@ -63,10 +64,12 @@ never writes into the image folder (R10).
      on mps  results/train/resnet18_v1/model.pt 8380851f8b4e`. Then nothing until the first event.
    - Within ~2 s, `$OUT` contains `overlays/`, `predictions.csv`, `session.json` and `trial_log.csv`.
    - In `session.json`, `"git"` is the frozen commit **without** `+modified`.
-3. **Watch the log** in a second terminal: `tail -f "$OUT/trial_log.csv" | cut -d, -f6,8`. Each new image adds one
-   `file,status` line within ~1 s.
+3. **Watch the log** in a second terminal: `tail -f "$OUT/trial_log.csv" | cut -d, -f6,8,77`. Each new image adds one
+   `file,status,path` line within ~1 s.
 4. **Check the first few images:**
-   - No status `wrong_size`: they must be 640×480.
+   - No status `wrong_size`. Column 77 (`path`) is `1080->640` for 1920×1080 frames (warped into the DEV grid with
+     `frame_warp_1080.json`, D039) or `640` for 640×480 frames. Any other size (e.g. the 320×240 stream) is
+     `wrong_size`: see §4.
    - Column 7 (`frame_t`) increases by the camera's frame interval (`cut -d, -f6,7 "$OUT/trial_log.csv"`).
    - Images already in `IN` when you start are processed first, in name order.
 
@@ -103,7 +106,8 @@ never writes into the image folder (R10).
 | `ValueError: ... model.pt does not match the sha256 recorded in run.json` | The model file was changed or damaged | Don't run the ResNet; restore the folder from the backup |
 | `ModuleNotFoundError: No module named 'torch'` | `.venv` lacks torch | `../.venv/bin/pip install torch torchvision` before the session (not on the day); or run `--inspector rule` |
 | Status `unreadable` | The image can't be decoded (corrupt, or still incomplete after 3 s) | One-off: note it, keep going. Every image: the copy route is broken → Ctrl-C, check with CSI |
-| Status `wrong_size` (note says e.g. `1920x1080, expected 640x480`) | The camera isn't the 640×480 view the position map is built for | Ctrl-C. Do **not** resize by hand; the 1920×1080 map (plan step 5) is needed |
+| Status `wrong_size`, note e.g. `320x240, expected 640x480 or 1920x1080` | The images are neither 1920×1080 nor 640×480 (e.g. the 320×240 stream) | Ctrl-C. Ask CSI for the 1920×1080 images. Never resize or crop by hand |
+| Status `wrong_size`, note `1920x1080, expected 640x480` (no `or 1920x1080`) | `frame_warp_1080.json` is missing from this copy, so 1080 frames can't be warped | Ctrl-C. Check the version and hashes (§0.1, or the preflight in §7); use the frozen package |
 | Status `refused` | A dataset holdout frame (runs 4–5) arrived in the folder | Ctrl-C; take that folder out of use; tell Noor |
 | Status `error` (the note has the message) | One frame failed; the program keeps going | One-off: note it. Repeated: Ctrl-C, start again with a new `OUT`, log it as an intervention |
 | A new image is in `IN` but no trial-log line appears | It isn't `.png` / `.jpg` / `.jpeg`, or its name starts with `.` (ignored) | `ls -la "$IN"`; ask CSI for the file type |
@@ -111,22 +115,27 @@ never writes into the image folder (R10).
 | Boxes on the overlay don't sit on the holes; many holes UNSURE or WAITING that look filled | The camera view differs from the position map | Ctrl-C; take one photo of the screen; tell Noor. Never re-aim or move the camera (CSI rule) |
 | The program crashed, or the terminal closed | — | Start again with a **new** `OUT` (§1). Images already in `IN` are processed again into the new session. Log the restart as an intervention |
 
-## 5. Staged test images: don't run the software on them on the day
-- The 22 staged images are the sealed test. Their labels are adjudicated first, before any model output is looked at.
-  They are scored once, after the freeze (plan step 11).
+## 5. Staged test images: score them only after their labels are locked
+- The 22 staged images are the sealed test (D036). Their labels are adjudicated and **locked first** (the labels CSV
+  and its sha256 written down) before any output is looked at. Each arm is scored once.
 - Keep them in their own folder that is **never** `IN`. While staging, `live_inspect.py` is stopped or watching a
   different folder.
-- Scoring later (step 11), after the labels are locked, once per arm:
-  `../.venv/bin/python live_inspect.py --source replay:<staged dir> --gate each --inspector <rule|resnet> --out results/live/sealed_<arm>`.
-  `--gate each` scores every arm-clear image (one image per setup). For the ResNet, also run
-  `--threshold preregistered` into its own `OUT` and report it next to the D038 result.
+- Command (on the GB10 right after the labels are locked, §7 step 4; or later on the Mac), once per arm:
+  `<python> live_inspect.py --source replay:<staged dir> --gate each --out results/live/staged_<arm>_<time>`
+  (Mac: `<python>` = `../.venv/bin/python`, add `--inspector resnet` for arm A; the ResNet is not in the GB10 package).
+  For the ResNet, also run `--threshold preregistered` into its own `OUT` and report it next to the D038 result.
+- `--gate each` scores every arm-clear image on its own: each staged setup is an independent fixture, and its fill
+  frontier comes from that image alone (tested: two different fixtures in a row give the same result as each alone).
+  **Never add `--track`** here: the tracker carries MISSED latches from one image to the next. Images are taken in
+  time order (time in the name, else file time); the order does not change any result. An image with the arm over
+  the fixture is logged `arm` and not scored.
 
 ## 6. Open before the freeze
-- CSI: camera resolution (640×480 assumed here) and how images reach the laptop (shared folder or CSI PC); both
-  unconfirmed.
-- CSI file names: whether they carry a timestamp (the event rule needs a real frame time; otherwise the file's
-  modification time is used).
+- CSI: how images reach our process on the GB10 (folder path, which stream, file names with a timestamp or not:
+  the event rule needs a real frame time, otherwise the file's modification time is used); a screen for the overlay.
+- 1920×1080 is handled by the D039 warp; the 320×240 stream is not supported (`wrong_size`).
 - An on-screen operator window that refreshes itself (today: the overlay file only).
 - The frozen inspector and thresholds (R4); the full robustness tests (R8); the freeze record and hashes (R11).
 - Measured on this Mac (DEV run 1 replay): rule median 27 ms per scored image, ResNet (MPS) 74 ms; 1.3 ms per other
-  image (R7 target ≤ 1 s). ResNet start-up (torch, model load, warm-up) takes about 2.5 s before its first line.
+  image (R7 target ≤ 1 s); a 1920×1080 frame adds ~3.4 ms for the warp. ResNet start-up (torch, model load, warm-up)
+  takes about 2.5 s before its first line.

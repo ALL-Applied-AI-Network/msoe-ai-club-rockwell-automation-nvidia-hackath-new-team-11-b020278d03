@@ -90,6 +90,35 @@ YAAD team code).
     the billed figure); stopped, not deleted.
   - **Files** (gitignored): `results/isaac_gate/run2/` (report, evidence, probe log); tarballs in
     `~/Downloads/isaac_gate_run2/`. Run 1 files unchanged (88 sha256 re-checked).
+- **Training set `train_v1` (Oct 23, `cc-isaac-gate-2`, ~19:09–20:40 UTC).** `configs/train_v1.json` +
+  `configs/tilt_train.json` on the `work1` overlay, recipe `configs/recipe_dev.json` (DEV runs 1–3 only, sha
+  `0ea15f52…`), code `9fcee85`.
+  - **Checks fixed beforehand, both passed:** batch renderer vs `render_keep.py` mean diff 0.87 / 0.87 / 0.007 grey
+    (limit 2.0), lens byte-identical to `tools/apply_lens.py`; recipe pre-flight wall |dL| 0.98, |db| 0.5, cap median
+    ΔE 2.15, saturated cap b* 73 vs pale 47.
+  - Labels generated on the instance = Mac labels (only float noise ≤ 9e-13 from its newer usd-core/numpy).
+  - Renders 520/520 + 48/48 ok, 0 errors, 7.1 s/scene in one Isaac session (`render_batch.py`); render + crops + pack
+    4,004 s.
+  - **17,040 crops:** pass 7,289 · no_vial 3,801 · crooked 3,275 · missing 2,675. Validation by scene: 113 scenes,
+    3,390 crops.
+  - Copy back: 190 MB pack, sha256 `a0aaa329…` on both ends, 18,184 inner hashes OK. Files (gitignored):
+    `results/train_v1/`; tarball in `~/Downloads/isaac_train_v1/pack/`.
+  - Access: direct ssh started rejecting the Brev key mid-session (`brev exec` still worked); `brev refresh` fixed it,
+    address unchanged.
+  - **Cost:** up ~19:09 UTC, stopped by Noor from the console ~20:38, STOPPED by 20:45 ≈ 1.5 h ≈ $6.5–6.9 (the
+    console has the billed figure); stopped, not deleted.
+- **Synthetic-only ResNet-18 v1 (Oct 23, Mac MPS, `train_resnet.py` @ `097eaa3`).** ImageNet weights; design and
+  threshold rule fixed before any training render; 15 epochs, 27 min; no real image read.
+  - Synthetic validation is saturated: accuracy 1.000 from epoch 3 (one dip to 0.981 at epoch 6); final epoch kept.
+    Highest non-defect score 0.008, lowest defect score 0.9966.
+  - **Threshold (pre-registered rule):** t_defect = 0.99968 → validation defect recall 0.995 (6 of 1,200 missed:
+    5 crooked → pass, mostly 20° tilts; 1 missing → no_vial); false alarms 0 on pass and on no_vial.
+    t_catch_every_val_defect = 0.99664, also 0 false alarms.
+  - **Open concern (not acted on):** on perfectly separable validation the 99.5 % rule puts t at the top of the
+    defect scores. It drops 6 defects the model scores ≥ 0.9966 and leaves no margin for the real-camera shift. Any
+    rule change must be decided and recorded before the first DEV evaluation.
+  - Files (gitignored): `results/train/resnet18_v1/` (`model.pt` sha `8380851f…`, `thresholds.json` sha
+    `e9f4b5c5…`, `run.json`, `val_predictions.csv`).
 - **Generator on the GPU (Oct 22):** selftest passed; smoke 300×30 and tilt sweep 130×30 labels OK + physical checks
   OK on the instance. 6 check renders `exit=0`, 34 s each, 30 crops each (`results/isaac_gate/check1/`). All-seated
   sweep 00000 vs gate baseline: mean abs diff 1.0 grey level. Eye checks: boxes on vials; hidden caps/vials absent;
@@ -112,7 +141,9 @@ YAAD team code).
   - B5 (frame luminance 0.41) is recorded as a **known scene-composition limitation outside the 30 inspected crops**:
     the station-frame steel near the lens, plus no MagneMover or facility in station-only scenes.
   - No more gate fixes. Training renders use the `work1` overlay as their base.
-- **No synthetic-trained ResNet-18 exists.** Synthetic-to-real transfer is untested. No transfer claim anywhere.
+- **Synthetic-only ResNet-18 v1 exists; synthetic-to-real transfer is untested.** Its synthetic validation is
+  saturated, so it says nothing about real frames; the G3 check on DEV runs 1–3 has not been run. No transfer claim
+  anywhere.
 - **No live runtime exists** (camera frames → 30 per-hole results on screen + trial log). Most parts exist offline
   (`positions.py`, `fill_state.py`, `inspect_frame.py` event detection, `eval_metrics.py`); the live wrapper does not.
 - Known generator limits (D035): tilted caps use the gate's approximate rim pivot (twin cap mesh has no interior);
@@ -267,7 +298,8 @@ validation. `labels/dev_labels.csv` = DRAFT labels.
   authorized an instance.
   - `cc-isaac-gate` (g6e.4xlarge L40S, $3.65/hr) shows FAILURE: it could not restart Oct 23 (no capacity in its
     region); left untouched.
-  - `cc-isaac-gate-2` (Mumbai ap-south-1, g6e.4xlarge L40S, **$4.38/hr**) is **stopped** after gate run 2.
+  - `cc-isaac-gate-2` (Mumbai ap-south-1, g6e.4xlarge L40S, **$4.38/hr**) is **stopped** after the `train_v1`
+    render (Oct 23, ~20:40 UTC).
   - Create instances from the console (CLI launch fails). Stop instances whenever idle. No personal spending (D010).
 - Dan Schneider's Oct 16 Brev org for Noor (as Ignite captain, $500): relation to `UWM/MSOE-Team-25` not confirmed —
   don't spend from two orgs without Noor saying so.

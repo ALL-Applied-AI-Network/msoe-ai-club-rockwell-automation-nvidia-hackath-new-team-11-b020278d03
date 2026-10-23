@@ -73,12 +73,14 @@ YAAD team code).
       the frame has no station geometry. So B5 cannot reach OK with lights or materials.
   - **Execution:** `run_log.txt`: "kit files match MANIFEST.sha256", 6 × `exit=0`, 34–36 s per render, script 214 s
     ≈ $0.26. X1–X5 clear → valid run.
-  - **V1–V4 pass, B6 visible:** checked by Claude on both panels and all six full frames **before** reading ΔE; Noor
-    to confirm.
+  - **V1–V4 pass, B6 visible:** checked by Claude on both panels and all six full frames **before** reading ΔE;
+    **confirmed by Noor** (Oct 23; Claude in chat also checked the run 2 panels).
   - **Hard checks pass:** G0 0.76/0.87 px · G1 0.725 · A1 30/30 · A2 318/310 = 1.03.
   - **Bands, run 1 → run 2 (prediction):** B1 19.1 → **8.7 OK** (8.7) · B2 21.7 → **13.3 OK** (13.3) · B3 14.3 → 9.8
     OK (9.8) · B4 14.4 → 7.2 OK (8.2) · B5 0.54 → **0.41 WORK** (0.41) · B6 OK.
-  - **Outcome (§5): PASS WITH WORK**, the same row as run 1; B5 is the only WORK item.
+  - **Outcome (§5): PASS WITH WORK**, the same row as run 1; B5 is the only WORK item. **Final gate result (D037):**
+    PASS WITH WORK in every report; B5 is a known scene-composition limitation outside the 30 inspected crops; no
+    further gate fixes.
   - **Regressions vs run 1** (all inside their limits):
     - G0 median 0.57 → 0.76 px; G1 0.735 → 0.725; A2 0.99 → 1.03.
     - Crooked-cap ratios: centroid t20 2.68 → 2.46, t30 4.21 → 3.92; elongation t20 1.12 → 0.08, t30 1.78 → 0.71.
@@ -106,13 +108,10 @@ YAAD team code).
 ### 2. Implemented but NOT verified
 - **Generator overrides only partly checked:** 3 smoke renders show different lighting; whether every light and
   material override is honoured, and whether the variation looks realistic, is not measured yet.
-- **Gate WORK after run 2: only B5 (frame luminance 0.41) is still open.** B1 and B2 are fixed by `work1` and
-  verified.
-  - B5 needs a scene decision, not lights or materials: either the station-frame part near the lens, or composing the
-    MagneMover + facility.
-  - Awaiting review (ChatGPT/Noor) before any dataset.
-  - Training renders would use the `work1` overlay (the generator inherits its base light and cap values; the
-    generator's randomization ranges are not yet re-checked against it).
+- **Gate closed (D037, Oct 23): PASS WITH WORK.** B1 and B2 are fixed by `work1` and verified.
+  - B5 (frame luminance 0.41) is recorded as a **known scene-composition limitation outside the 30 inspected crops**:
+    the station-frame steel near the lens, plus no MagneMover or facility in station-only scenes.
+  - No more gate fixes. Training renders use the `work1` overlay as their base.
 - **No synthetic-trained ResNet-18 exists.** Synthetic-to-real transfer is untested. No transfer claim anywhere.
 - **No live runtime exists** (camera frames → 30 per-hole results on screen + trial log). Most parts exist offline
   (`positions.py`, `fill_state.py`, `inspect_frame.py` event detection, `eval_metrics.py`); the live wrapper does not.

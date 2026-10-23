@@ -315,7 +315,7 @@ def make_pos(pid, state, variant=None, **kw):
 # ------------------------------------------------------------------------------------------------------------ config
 RANDOM_KEYS = {"name", "purpose", "schema", "mode", "n_scenes", "fixture", "placements", "states", "pass_variants",
                "crooked_variants", "lean_fraction", "tilt_deg", "lift_mm", "offset_mm", "lean_deg", "lighting",
-               "materials", "twin_fix", "crooked_adjacent", "recipe"}
+               "materials", "twin_fix", "crooked_adjacent", "recipe", "placements_mix"}
 SWEEP_KEYS = {"name", "purpose", "schema", "mode", "fixture", "angles_deg", "directions_deg", "pattern", "lighting",
               "materials", "twin_fix", "recipe"}
 LIGHT_KEYS = {"intensity_scale", "color_temperature_k", "rotate_deg"}
@@ -398,6 +398,13 @@ def validate_config(cfg, twin=None):
         if not isinstance(cfg.get("n_scenes"), int) or cfg["n_scenes"] < 1:
             raise ConfigError("n_scenes must be a positive integer")
         _range(cfg, "placements", 0, 30)
+        if "placements_mix" in cfg:                  # [[weight, [lo, hi]], ...]: fill levels drawn from a mixture
+            mix = cfg["placements_mix"]
+            if not (isinstance(mix, list) and mix and all(isinstance(c, list) and len(c) == 2 and isinstance(c[0], (int, float))
+                                                          and c[0] >= 0 for c in mix)) or sum(c[0] for c in mix) <= 0:
+                raise ConfigError("placements_mix: [[weight, [lo, hi]], ...] with non-negative weights")
+            for _, rg in mix:
+                _range({"placements_mix range": rg}, "placements_mix range", *cfg["placements"])
         _weights(cfg, "states", STATES)
         _weights(cfg, "pass_variants", VARIANTS["pass"])
         _weights(cfg, "crooked_variants", VARIANTS["crooked_cap"])
@@ -485,7 +492,11 @@ def scene_rng(seed, index):
 
 def sample_random_scene(cfg, twin, seed, index):
     rng = scene_rng(seed, index)
-    K = int(rng.integers(cfg["placements"][0], cfg["placements"][1] + 1))
+    lo, hi = cfg["placements"]
+    if "placements_mix" in cfg:
+        w = np.array([c[0] for c in cfg["placements_mix"]], float)
+        lo, hi = cfg["placements_mix"][int(rng.choice(len(w), p=w / w.sum()))][1]
+    K = int(rng.integers(lo, hi + 1))
     specs, crooked = [], set()
     for pid in twin.ids:
         i = twin.pos[pid]["index"]

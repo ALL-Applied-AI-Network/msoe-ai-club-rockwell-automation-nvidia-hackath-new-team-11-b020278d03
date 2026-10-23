@@ -1,20 +1,36 @@
 {
  "schema": 1,
  "name": "train_v1",
- "purpose": "Synthetic-only ResNet-18 training/validation set (D037): work1 overlay twin; exposure, colour temperature, plate brightness and per-cap materials from configs/recipe_dev.json (DEV runs 1-3 only); crooked caps 20-30 deg tilts only (pre-registered >= 20 deg, D036), never two orthogonal neighbours; mostly full fixtures so empty holes are about a quarter of the crops.",
+ "purpose": "Synthetic-only ResNet-18 training/validation set (D037): work1 overlay twin; exposure, colour temperature, plate brightness and per-cap materials from configs/recipe_dev.json (DEV runs 1-3 only); crooked caps 20-30 deg tilts only (pre-registered >= 20 deg, D036), never two orthogonal neighbours; fill levels 1-30 (30 % of scenes uniform over 1-30 so empty and sparse fixtures are covered, 70 % at 23-30) so empty holes stay about a quarter of the crops; pass offsets are sideways only (fully seated by readback, D035).",
  "mode": "random",
  "fixture": "G",
  "twin_fix": "work1",
  "n_scenes": 520,
  "placements": [
-  18,
+  1,
   30
+ ],
+ "placements_mix": [
+  [
+   0.3,
+   [
+    1,
+    30
+   ]
+  ],
+  [
+   0.7,
+   [
+    23,
+    30
+   ]
+  ]
  ],
  "states": {
   "pass": 0.5,
   "crooked_cap": 0.32,
   "missing_cap": 0.2,
-  "no_vial": 0.05
+  "no_vial": 0.02
  },
  "crooked_adjacent": false,
  "pass_variants": {

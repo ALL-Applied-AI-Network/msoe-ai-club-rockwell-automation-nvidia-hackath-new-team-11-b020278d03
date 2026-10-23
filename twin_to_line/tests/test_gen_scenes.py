@@ -370,6 +370,21 @@ class TrainingRecipe(unittest.TestCase):
         self.assertAlmostEqual(pale, self.cfg["materials"]["cap_groups"]["pale"]["weight"], delta=0.04)
         empty = sum(s.state == "no_vial" for sp in specs for s in sp.positions) / (30 * len(specs))
         self.assertLess(empty, 0.3)                                                # rebalanced away from smoke's 58 %
+        K = [sp.placements for sp in specs]
+        self.assertTrue(min(K) <= 3 and max(K) == 30 and sum(k <= 10 for k in K) >= 5, K)   # empty-start fills covered
+        with self.assertRaises(G.ConfigError):
+            G.validate_config(dict(self.cfg, placements_mix=[[1.0, [0, 40]]]), self.t)
+
+    def test_pass_offsets_are_sideways_and_fully_seated(self):
+        spec = next(sp for sp in (G.build_spec(self.cfg, self.t, 0, i) for i in range(40))
+                    if sum(s.variant == "offset" for s in sp.positions) >= 3)
+        rb = G.read_back(self.t, G.author_scene(self.t, spec, os.path.join(self.tmp, "off")))
+        for s in spec.positions:
+            if s.variant == "offset":
+                r = rb["positions"][s.position]
+                self.assertEqual((r["state"], r["variant"]), ("pass", "offset"))
+                self.assertLess(max(abs(r["seat_gap_min_mm"]), abs(r["seat_gap_max_mm"]), r["tilt_deg"]), 1e-9)
+                self.assertAlmostEqual(r["base_offset_mm"], s.offset_mm, places=6)
 
 
 class FrozenGate(unittest.TestCase):

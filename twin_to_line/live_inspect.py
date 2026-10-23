@@ -12,6 +12,12 @@ Sources (one code path after decoding: Session.process_frame):
               (JPEG FFD9 / PNG IEND) is present, so a half-written file is never read
 Frame time: from a video frame id (cap_seal_video_1.mp4@t0612.0.png) or a CSI still name
 (cap_seal_20260922_192843_993721.jpg); otherwise the file's modification time.
+Frame size (the 'path' column of the trial log):
+  640x480    the DEV cap_seal grid: processed as is ('640')
+  1920x1080  warped into the DEV 640x480 grid with the frozen transform frame_warp_1080.json (frame_warp.py,
+             INTER_AREA), then the same 640 path ('1080->640'): position_map_G.json + DEV offset, event gate, rule
+             thresholds and crops are all unchanged. session.json records the transform file's sha256
+  any other  wrong_size, nothing processed
 Gating (--gate):
   events (default)  events.py's rule, online: arm-clear frames with no position changing by >= CHANGE_T form a
                     segment; one that lasts >= STABLE_S and differs from the previous event is an event, and its
@@ -40,6 +46,7 @@ import cv2, numpy as np
 import positions as P
 import real_data as R
 import events as E
+import frame_warp as FW
 from eval_metrics import gt_final
 from fill_state import SequenceTracker, LIVE_FILL, MODES
 from inspect_frame import inspect, annotate, prediction_rows, safe
@@ -50,13 +57,14 @@ STILL_RE = re.compile(r"(\d{8})_(\d{6})_(\d{6})")
 FLAGGED = ("DEFECT", "MISSED", "UNSURE")
 RUNTIME_FILES = ("live_inspect.py", "inspect_frame.py", "positions.py", "fill_state.py", "rules.py", "events.py",
                  "real_data.py", "position_map_G.json", "registration_dev.json", "rule_thresholds.json",
-                 "resnet_inspector.py", "train_resnet.py")
+                 "resnet_inspector.py", "train_resnet.py", "frame_warp.py", "frame_warp_1080.json")
 PRED_FIELDS = ["run", "event", "frame", "position", "predicted_state", "defect_score", "pred_sequence", "final_state",
                "K", "K_source", "cap_frac", "cap_offset", "reason"]
 IDS = [f"G{i:02d}" for i in range(1, 31)]
 TRIAL_FIELDS = (["time_utc", "session", "git", "inspector", "model_sha256", "input_file", "frame_t", "status", "arm_px",
                  "event", "event_frame", "event_delay_s", "K", "n_flagged", "n_differ_from_expected", "latency_ms"]
-                + [f"pred_{p}" for p in IDS] + [f"exp_{p}" for p in IDS] + ["note", "intervention"])
+                + [f"pred_{p}" for p in IDS] + [f"exp_{p}" for p in IDS] + ["path", "note", "intervention"])
+PATH_640, PATH_1080 = "640", "1080->640"
 
 
 def sha256(path):
@@ -224,9 +232,12 @@ class CsvLog:
 
 class Session:
     def __init__(self, out, source="", run_id=None, gate="events", mode=LIVE_FILL, track=False, labels=None,
-                 note="", ix="auto", pmap=None, inspector=None, quiet=False):
+                 note="", ix="auto", pmap=None, inspector=None, quiet=False, warp="auto"):
         self.out, self.run_id, self.mode, self.quiet = out, run_id, mode, quiet
         self.pm = pmap or P.PositionMap(); self.plate = self.pm.plate_mask()
+        self.warp = FW.load() if warp == "auto" else warp           # None: 1080 frames are wrong_size
+        if self.warp is not None and self.warp.size_out != tuple(self.pm.size):
+            raise ValueError(f"frame warp outputs {self.warp.size_out}, the position map is {self.pm.size}")
         self.insp = inspector or RuleInspector()
         self.gate = EventGate(self.pm.anchor_boxes, self.pm.ids, each=gate == "each")
         self.tracker = SequenceTracker(1, mode) if track else None
@@ -245,6 +256,7 @@ class Session:
                      "position_map": {"file": os.path.relpath(P.MAP_PATH, P.HERE), "sha256": sha256(P.MAP_PATH),
                                       "image_size": list(self.pm.size), "offset_px": list(self.pm.offset),
                                       "offset_source": self.pm.offset_source},
+                     "frame_warp": self.warp.info() if self.warp else None,
                      "event_rule": {"change_t": E.CHANGE_T, "stable_s": E.STABLE_S, "arm_min_area": E.ARM_MIN_AREA},
                      "code_sha256": {f: sha256(os.path.join(P.HERE, f)) for f in RUNTIME_FILES}}
         self.write_info()
@@ -276,9 +288,14 @@ class Session:
                 row.update(status="refused", note=why)
             elif img is None:
                 row.update(status="unreadable", note="could not decode the image")
-            elif img.shape[1::-1] != tuple(self.pm.size):
-                row.update(status="wrong_size", note=f"{img.shape[1]}x{img.shape[0]}, expected {self.pm.size[0]}x{self.pm.size[1]}")
+            elif img.shape[1::-1] == tuple(self.pm.size):
+                row["path"] = PATH_640
+            elif self.warp is not None and img.shape[1::-1] == self.warp.size_in:
+                img, row["path"] = self.warp.apply(img), PATH_1080
             else:
+                ok = [self.pm.size] + ([self.warp.size_in] if self.warp else [])
+                row.update(status="wrong_size", note=f"{img.shape[1]}x{img.shape[0]}, expected " + " or ".join(f"{w}x{h}" for w, h in ok))
+            if row.get("path"):
                 t = frame_time(path) if t is None else t
                 arm = E.arm_pixels(img, self.pm, self.plate)
                 status, ev, changed = self.gate.update(name, t, img, arm > 0)

@@ -1,4 +1,4 @@
-import csv, os, shutil, subprocess, sys, tempfile, unittest, unittest.mock
+import csv, json, os, shutil, subprocess, sys, tempfile, threading, time, unittest, unittest.mock
 from datetime import datetime, timedelta
 import cv2, numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -15,6 +15,8 @@ T0 = datetime(2026, 10, 26, 12, 30, 0)
 EVENTS = os.path.join(P.HERE, "results", "prototype", "events")
 DEV_STILLS = [os.path.join(EVENTS, "cap_seal_video_1.mp4@t1050.0.png"), os.path.join(EVENTS, "cap_seal_video_1.mp4@t0464.0.png")]
 RUN3_EMPTY = "cap_seal_20260923_184630_557477.jpg"
+REPLAY1 = os.path.join(P.HERE, "results", "live", "replay_run1")
+PY = sys.executable
 DEV = os.path.exists(os.path.join(R.REAL_ROOT, "image_index.csv")) and all(map(os.path.exists, DEV_STILLS))
 
 
@@ -127,6 +129,86 @@ class Provenance(unittest.TestCase):
         b = open(os.path.join(P.HERE, "gb10", "bootstrap.sh")).read()
         self.assertIn("--no-index", b); self.assertIn("--preflight", b); self.assertIn("sha256sum --quiet -c SHA256SUMS", b)
         self.assertTrue(os.access(os.path.join(P.HERE, "gb10", "bootstrap.sh"), os.X_OK))
+
+
+class FolderIgnoresOldImages(unittest.TestCase):
+    """CSI's camera folder will still hold the 22 staged images when the live run starts: folder mode reads new images only."""
+
+    def test_three_old_two_new(self):
+        d = tempfile.mkdtemp()
+        for k in range(3):
+            cv2.imwrite(os.path.join(d, name(k)), fixture(range(1, k + 2)))
+        frames = L.watch(d, poll=0.05, idle_exit=0.8)                          # the folder is looked at here
+        for k in (3, 4):
+            cv2.imwrite(os.path.join(d, name(k)), fixture(range(1, k + 2)))
+        out = tempfile.mkdtemp(); L.run(L.Session(out, gate="each", ix=None, quiet=True), frames)
+        self.assertEqual([r["input_file"] for r in read_csv(os.path.join(out, "trial_log.csv"))], [name(3), name(4)])
+
+    def test_cli_logs_and_counts_the_ignored_images(self):
+        d, out = tempfile.mkdtemp(), os.path.join(tempfile.mkdtemp(), "o")
+        for k in range(3):
+            cv2.imwrite(os.path.join(d, name(k)), fixture([1]))
+        p = subprocess.Popen([PY, "live_inspect.py", "--source", f"folder:{d}", "--gate", "each", "--idle-exit", "1.5",
+                              "--out", out], cwd=P.HERE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        time.sleep(1.0)
+        for k in (3, 4):
+            cv2.imwrite(os.path.join(d, name(k)), fixture([1, 2]))
+        log, _ = p.communicate(timeout=60)
+        self.assertEqual(p.returncode, 0, log)
+        self.assertIn("3 image(s) already there are ignored", log)
+        self.assertEqual([r["input_file"] for r in read_csv(os.path.join(out, "trial_log.csv"))], [name(3), name(4)])
+        self.assertEqual(json.load(open(os.path.join(out, "session.json")))["ignored_existing_images"], 3)
+
+
+class OperatorView(unittest.TestCase):
+    def test_console_grid_camera_layout(self):
+        res = {"positions": [{"position": f"G{i:02d}", "final_state": st} for i, st in
+                             zip(range(1, 31), ["PASS"] * 3 + ["MISSED", "PASS", "DEFECT", "UNSURE"] + ["WAITING"] * 23)]}
+        g = L.console_grid(res).splitlines()
+        self.assertEqual(len(g), 6)
+        self.assertEqual(g[0].split()[::2], ["G26", "G21", "G16", "G11", "G06", "G01"])
+        self.assertEqual(g[4].split()[::2], ["G30", "G25", "G20", "G15", "G10", "G05"])
+        self.assertTrue(g[0].rstrip().endswith("G06 DEF   G01 ok"))
+        self.assertIn("G04 MISS", g[3]); self.assertIn("G07 ??", g[1]); self.assertIn("G26 .", g[0])
+        self.assertIn("PASS 4  DEFECT 1  MISSED 1  UNSURE 1  WAITING 23", g[5])
+        self.assertNotIn("\x1b", "\n".join(g)); self.assertIn("\x1b[1;31m", L.console_grid(res, color=True))
+
+    def test_view_page_written_with_the_session(self):
+        out = os.path.join(tempfile.mkdtemp(), "sess1"); L.Session(out, ix=None, quiet=True).close()
+        page = open(os.path.join(out, L.VIEW_HTML)).read()
+        self.assertIn('"overlay_latest.png?t=" + Date.now()', page); self.assertIn("setInterval(tick, 1000)", page)
+        self.assertIn("sess1", page); self.assertNotIn("http", page)               # no network, file:// only
+
+    @unittest.skipUnless(os.path.isdir(REPLAY1), "DEV run 1 replay folder not exported on this machine")
+    def test_dev_run1_replay_grid_and_atomic_overlay(self):
+        """DEV run 1 replay through the CLI: one grid per event on the console, and overlay_latest.png is always a
+        whole PNG while a reader polls it (written to a temp name, then renamed)."""
+        out = os.path.join(tempfile.mkdtemp(), "dev_run1_view"); latest = os.path.join(out, "overlay_latest.png")
+        reads, bad, stop = [0], [0], threading.Event()
+
+        def reader():
+            while not stop.is_set():
+                try:
+                    data = open(latest, "rb").read()
+                except OSError:
+                    time.sleep(0.002); continue
+                img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+                reads[0] += 1; bad[0] += img is None
+
+        th = threading.Thread(target=reader); th.start()
+        try:
+            r = subprocess.run([PY, "live_inspect.py", "--source", f"replay:{REPLAY1}", "--out", out], cwd=P.HERE,
+                               capture_output=True, text=True, timeout=600)
+        finally:
+            stop.set(); th.join()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = r.stdout.splitlines()
+        self.assertEqual(sum(l.startswith("event ") for l in lines), 18)
+        self.assertEqual(sum(l.split()[:1] == ["G26"] for l in lines), 18)
+        self.assertEqual(sum(l.strip().startswith("PASS ") for l in lines), 18)
+        self.assertGreater(reads[0], 0); self.assertEqual(bad[0], 0)
+        self.assertFalse(os.path.exists(os.path.join(out, ".overlay_latest.png")))
+        self.assertTrue(os.path.exists(os.path.join(out, L.VIEW_HTML)))
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 # Twin-to-Line — Handoff (read first)
-Updated: 2026-10-23 (Fri) evening CT. One handoff, two identical copies: `twin_to_line/HACKATHON_HANDOFF.md` (canonical, in
-git) and the Claude Project doc `claude/hackathon-handoff.md`. Decisions: `DECISIONS.md` (D001–D038, same two-copy rule).
-**The Project copies of this file and DECISIONS.md are behind the repo copies (Oct 23: D037, D038, gate run 2, training,
-G3) — Noor syncs them from these.**
+Updated: 2026-10-23 (Fri) night CT. One handoff, two identical copies: `twin_to_line/HACKATHON_HANDOFF.md` (canonical, in
+git) and the Claude Project doc `claude/hackathon-handoff.md`. Decisions: `DECISIONS.md` (D001–D039, same two-copy rule).
+**The Project copies of this file and DECISIONS.md are behind the repo copies (Oct 23: D037–D039, gate run 2, training,
+G3, 1080 frames, GB10 package) — Noor syncs them from these.**
 Detailed plan to Oct 26: Project doc `claude/next-session-plan.md` (repo copy `twin_to_line/NEXT_SESSION_PLAN.md`).
 New session: work from `~/code/ignite`, run `git status` first, read the plan, then this, continue from **NEXT ACTION**.
 Do not reopen settled decisions without new evidence. Replace stale facts; no diary. **Never put passwords, tokens,
@@ -24,7 +24,7 @@ YAAD team code).
 - Working setup: ChatGPT = technical lead/reviewer, Claude = implementation engineer, Noor = product owner (final calls,
   talks to teammates/organizers). Noor is a Code Crusaders **member, not captain**: "compare and decide together".
 
-## Status (Fri Oct 23, evening)
+## Status (Fri Oct 23, night)
 ### 1. Completed and verified
 - **Scene generator** on local branch `feat/scene-generator`, commit `5c69c9f` (parent `2189e3a`, PR #1's branch
   `feat/organizer-feedback-integration`). New: `gen_scenes.py`, `configs/smoke.json` (300 scene definitions),
@@ -143,6 +143,37 @@ YAAD team code).
     offline as arm A. The step-9 inspector choice is Noor's.
   - Files (gitignored): `results/g3/resnet18_v1/` (`g3_report.json`, predictions per arm, `probabilities.csv`,
     `annotated/`).
+- **1920×1080 frames (D039, Oct 23, `2504904`).** CSI's 1080 still of the empty Good fixture
+  (`results/csi_1080/csi_1080_empty_G.jpg`, sha256 `673a76a6…`, not in git) is the cap_seal view at a higher
+  resolution: the 640×480 frames are its centre 4:3 part scaled by ~1/2.25.
+  - Frozen transform `frame_warp_1080.json` (sha256 `9837b298…`, `register_1080.py`): a similarity registered image to
+    image onto the DEV run-3 empty frame: scale 2.24918, rotation +0.009°, offset (239.83, −5.39) px. Station-only,
+    G-only and S-only fits agree within 0.32 px at the 30 holes; OpenCV ECC affine within 0.05 px.
+  - `live_inspect.py` picks by size: 640×480 as is; 1920×1080 → `frame_warp.py` (INTER_AREA) → the unchanged 640 path
+    (map + DEV offset, gate, rule thresholds, crops); any other size `wrong_size`. Trial-log column `path`; the
+    transform's sha256 in `session.json`.
+  - Warped still: holes 30/30, median 1.74 px, mean (−1.67, +0.16), vs run 3's 1.68 px, (−1.57, +0.12); rule 30 WAITING.
+  - DEV runs 1–3 as 1080 copies (`replay_1080.py`; geometry and plumbing only): identical events and statuses; 4 of
+    600 holes differ (labelled pass, at rule thresholds); recall 31/32 on both; false positives 14/551 vs 10/551 (from
+    the round trip's smoothing, not a 1080 result). **Not yet tested on real 1080 frames with caps.**
+  - The twin-hole fit `position_map_G_1080.json` (`5cc73fb`) is evidence only: 1.75 px off the DEV grid (hole-vs-cap bias).
+- **GB10 package + YAAD Spark rehearsal (Oct 23, `a72c51b`…`23b6764`).** `gb10/build_package.py` (Mac, from HEAD)
+  builds `results/gb10_pkg/ttl_gb10_<sha>.tar` (243 MB, not in git): git archive (`ARCHIVE_COMMIT` filled in), standalone
+  CPython 3.11.17 aarch64, aarch64 wheels (cp311/cp312: numpy 2.4.6 + opencv-python-headless 5.0.0.93 = the Mac;
+  cp310: numpy 2.2.6), preflight frames (the still + 10 DEV run-1 event frames at 640 and 1080) with the Mac's
+  predictions. `bootstrap.sh`: checksums → code → Python → offline install → `live_inspect.py --preflight`.
+  - YAAD Spark (DGX Spark, GB10, Ubuntu 24.04.3, glibc 2.39; bare container, no python3/tmux/scp): unpack →
+    `PREFLIGHT OK` in 5 s. DEV run 1 at 640 and as a 1080 copy built there: identical to the Mac (18 events, 0 of 540
+    holes differ, score difference 0). Folder mode with the still: scored 0.4 s after the copy, 30 WAITING.
+  - System-Python fallback (bundled Python disabled, non-root user, package in the home folder), arm64 Ubuntu 22.04
+    (Python 3.10) and 24.04 (3.12) containers on the Mac: `PREFLIGHT OK`, identical to the Mac.
+  - Spark folder `/workspace/ttl_rehearsal_1023` (4.5 GB: packages, DEV run 1 frames + 1080 copy, a runs-1–3-only
+    index) is kept for the Sunday dry run; delete it after the event.
+- **Monday readiness in `live_inspect.py` (Oct 23).** Staged stills with `--gate each` (no `--track`) are scored each on
+  their own (tested). Folder mode ignores images already in the folder at start (the camera folder will hold the staged
+  images). Operator view: a console grid per event in the camera layout (primary), the overlay replaced atomically,
+  and `view.html` reloading it every second (checked in Chrome over http://127.0.0.1; the test browser can't open
+  `file://`). `LIVE_RUNBOOK.md` §7 is the Monday procedure.
 - **Generator on the GPU (Oct 22):** selftest passed; smoke 300×30 and tilt sweep 130×30 labels OK + physical checks
   OK on the instance. 6 check renders `exit=0`, 34 s each, 30 crops each (`results/isaac_gate/check1/`). All-seated
   sweep 00000 vs gate baseline: mean abs diff 1.0 grey level. Eye checks: boxes on vials; hidden caps/vials absent;
@@ -168,9 +199,9 @@ YAAD team code).
 - **Synthetic-only ResNet-18 v1 does not transfer to DEV frames (G3 NO-GO, 87.7 % false positives at D038).** Its
   synthetic validation is saturated and says nothing about real frames. No transfer claim anywhere; any model or
   threshold change after G3 needs Noor's OK and a new decision.
-- **The live runtime `live_inspect.py` is verified on DEV replays only, at 640×480.** It reads replay or watched
-  folders, gates on events, and writes the predictions CSV, trial log and overlay (`feat/live-runtime`, `LIVE_RUNBOOK.md`).
-  It is not yet tested on 1920×1080 frames, on a GB10, or with a real camera folder.
+- **The live runtime `live_inspect.py` is verified on DEV replays (640 and 1080 copies, on the Mac and the Spark), the
+  CSI 1080 still and synthetic folder runs.** Not yet tested on real 1080 frames with caps, on CSI's GB10, or with
+  CSI's real camera folder (how frames arrive is unknown).
 - Known generator limits (D035): tilted caps use the gate's approximate rim pivot (twin cap mesh has no interior);
   at 40° 29/240 crooked caps leave the runtime crop box (none at ≤35°); smoke labels are 58% empty positions (5,200 of
   9,000, mostly WAITING) → rebalance at training; materials vary per scene, not per cap; lifted caps (~0.3 px at 5 mm)
@@ -179,14 +210,14 @@ YAAD team code).
   generator's sha256 still identifies the code.
 
 ### 3. Pending team decisions (Code Crusaders) — architecture is a PROPOSAL (D031)
-1. **Live runtime owner — blocks the Oct 26 demo.** Ask Vang whether his "m8 inspection pipeline" is this; avoid two
-   runtimes. If nobody owns it by Fri Oct 23, Noor + Claude build the minimum version (plan §4).
+1. **Live runtime:** Noor + Claude built it (`live_inspect.py`, rule inspector, GB10 package). Tell Vang, and check that
+   his "m8 inspection pipeline" doesn't duplicate it.
 2. Which inspector leads: synthetic-only ResNet-18 (proposed) or the counterfactual / Vang's pipeline (scored either way).
 3. Train on twin renders only, not Dataset 1 real images.
 4. Sealed test = the Oct 26 staged images (+ runs 4–5 + organizer release); **every arm freezes Sun Oct 25 night** (D036).
 5. Owners: counterfactual (Vang + Trevor?), compute (Vang?), labels (Tony?), video/summary/business case (Zara?). Noor
    proposed for twin geometry, synthetic pipeline, ResNet-18, scorer.
-6. Compute split: Brev for the gate and renders; YAAD Spark (team exists) — who drives it.
+6. Compute split: Brev for the gate and renders; YAAD Spark: Noor's login, used for the GB10 rehearsal.
 7. Crooked-cap scope: pre-registered at ≥20° (D036) — team to acknowledge.
 8. Integration: whether/where `feat/scene-generator` is pushed (stacked on PR #1's branch).
 
@@ -196,92 +227,51 @@ YAAD team code).
   - The camera streams 320×240 and 1920×1080.
   - Our software runs on CSI's GB10, with no setup time beforehand.
   - He sent a 1080 empty-fixture still.
-  **Not answered yet:**
-  - how frames reach our process on the GB10;
-  - the GB10's OS, Python and internet access;
-  - copying our package onto it;
+  **Not answered yet** (draft question in NEXT ACTION 1):
+  - how frames reach our process on the GB10 (folder; new files or one rewritten name; which stream);
+  - copying our 243 MB package onto it (USB) before 12:30; a screen to look at;
+  - the GB10's OS, Python and internet (the package needs none of them);
   - the backup slot (Wed Oct 28 / Thu Oct 29).
   Never raised with him: side photos of tilted caps, filming the line, the optional live-defect demo (plan §2.6).
 - **Organizer question (narrowed, optional):** may the color-rule baseline use thresholds fitted on supplied runs 1–3?
   Only matters if renders fail and the rule baseline needs real-image thresholds (plan §7–8). Real-data training is off.
 - **PR #1 (Code Crusaders):** open, unmerged; holds the shared position mapping, fill-state logic and evaluation tools.
   Needs teammate review. The Ignite remote also has `origin/feat/organizer-feedback-integration`.
-- Dataset 1 organizer release (1920×1080) not on the Mac yet (link in Slack `#dataset-1-vial-inspection`) — needed now
-  in case the live camera is 1920×1080.
+- Dataset 1 organizer release (1920×1080) not on the Mac yet (link in Slack `#dataset-1-vial-inspection`):
+  development and evaluation only. Its labeler view sits +3.6° from the twin, unlike CSI's still (+0.4°).
 
-## NEXT ACTION (from Fri Oct 23 evening) — 1080 mapping, GB10 package, v2
-**Start on branch `feat/live-runtime`** (local only; it contains `feat/scene-generator` through merge `b98c9e8`).
-`git status -sb` → `## feat/live-runtime` + ` M twin_to_line/dose_sets.py`. Don't commit new work on `feat/scene-generator`.
+## NEXT ACTION (from Fri Oct 23 night) — CSI question, v2 attempt, freeze + package, Monday
+**Branch `feat/live-runtime`** (local only). `git status -sb` → `## feat/live-runtime` + ` M twin_to_line/dose_sets.py`.
 
-**State (Oct 23):**
-- Gate closed: PASS WITH WORK (D037). Training set `train_v1` (568 scenes, 17,040 crops) rendered; synthetic-only
-  ResNet-18 v1 trained; deployed threshold D038 t = 0.50224 (pre-registered 0.99968 reported next to it).
-- **G3 on DEV runs 1–3: NO-GO.** ResNet v1 at D038: recall 32/32, false positives 483/551 (87.7 %). No retuning; any
-  change needs Noor's OK and a new decision.
-- **Monday's live inspector is the rule baseline** (`live_inspect.py --inspector rule`, the default). Its thresholds are
-  DEV-fit (D033's organizer question is still open). The ResNet is scored offline as arm A.
-- `live_inspect.py` runs end to end on **640×480** replays and watched folders (`LIVE_RUNBOOK.md`); 125 tests pass.
-- **CSI (Shamar, Oct 23):**
-  - Session **Mon Oct 26, 12:30–2 pm, confirmed**.
-  - The camera streams **320×240 and 1920×1080**. Neither is the 640×480 that our map, runtime and renders use.
-  - Our software runs **on CSI's GB10, with no setup time beforehand**.
-  - A 1080 still of the empty Good fixture: `~/Downloads/csi_1080_empty_G.jpg`. Not on this Mac when checked Oct 23
-    evening: get it from Noor first.
+**State (Oct 23 night):**
+- 1920×1080 frames are handled by D039. The GB10 package passed on the YAAD Spark and in Ubuntu 22.04/24.04
+  containers (all `PREFLIGHT OK`, identical to the Mac). The Monday procedure is `LIVE_RUNBOOK.md` §7.
+- Live inspector = the rule baseline (ResNet-18 v1 G3 NO-GO; scored offline as arm A). `rule_thresholds.json` is
+  DEV-fit (D033's organizer question is still open).
+- The package in `results/gb10_pkg/` is pre-freeze: it is rebuilt Sunday from the freeze commit.
 
 **Tasks, in order:**
-1. **1080 mapping.** Monday's live and staged images will be 1920×1080; today `live_inspect.py` logs every such frame
-   as `wrong_size`.
-   - Look at the still first. Is it the same optical view as the 640×480 cap_seal frames (more pixels, different
-     crop), or a different view like the organizer's 1920×1080 fixed view (`check_organizer_grid.py`)?
-   - Fit the twin's G01–G30 geometry to the 30 empty holes in the still:
-     - same view: scale + offset;
-     - different view: camera pose from the twin's 3D hole positions.
-   - Write a 1080 map with the same fields as `position_map_G.json` (cap centres, anchor boxes, plate polygon). Never
-     edit `position_map_G.json`.
-   - Check it like the 640×480 map: hole residuals on the still (640×480 reference: 30/30, ~1.68 px median), and an
-     overlay with the boxes on the holes.
-   - **Runtime:** pick the map by image size. The rule's pixel sizes (CAP_R 11, OFF_R 13 px, `t_offset`) are 640×480
-     pixels: either resize each 1080 crop to its 640×480 crop size or rescale them. Decide and record which; the same
-     crops feed the ResNet arm offline.
-   - **320×240:** check whether it is the 640×480 view at half scale. Caps would be ~5 px, so fallback only.
-   - **Done when:** the still shows 30 boxes on the holes; a 1080 replay / folder run scores with no `wrong_size`; tests
-     cover the size switch.
-2. **GB10 package + Spark rehearsal.** There is no setup time on Monday, so everything must start from one folder in
-   minutes.
-   - **Package** (rule baseline; ResNet optional):
-     - `git archive` of the frozen commit, plus both maps and `rule_thresholds.json`;
-     - aarch64 wheels for numpy and opencv-python-headless (torch only if the ResNet goes);
-     - `bootstrap.sh`: venv, offline install, selftests, a short replay smoke test;
-     - `SHA256SUMS`.
-     Nothing from the package goes into git except scripts.
-   - **Rehearse on the YAAD Spark** (GB10-class, aarch64; VPN, tmux; identify it with `GB10_PREFLIGHT.md` §1):
-     - unpack in a clean folder and time `bootstrap.sh`;
-     - replay DEV run 1 and compare with the Mac (identical final states);
-     - run folder mode with the 1080 still copied in.
-     Copy DEV run 1–3 frames only, never runs 4–5.
-   - **Draft for Noor to ask Shamar** (short, plain; don't send):
-     - the GB10's OS, Python and internet access;
-     - whether we can copy a folder onto it before 12:30 or only on the day (USB?);
-     - where camera images land (folder path) and which stream we get;
-     - a screen for the overlay.
-3. **Saturday: v2 attempt** (offline arm A only; Monday's live inspector stays the rule baseline).
-   - **Target the two G3 failure modes on the render side** (twin overlay / recipe; development on DEV runs 1–3 is
-     allowed, D033):
-     - real empty holes read as uncapped vials (166/440, mostly the lighter top-row interiors);
-     - real seated caps read as crooked (median defect score 0.94).
-     Compare real and synthetic crops of both before changing anything.
-   - The v2 render camera follows task 1's result.
-   - **Rendering on Brev costs about $7** for a `train_v1`-size set at $4.38/hr: **ask Noor before starting an
-     instance.**
-   - Train with `train_resnet.py`, which writes the D038 threshold itself. Record the v2 changes as a new decision
-     before its G3, then run G3 once: `g3_check.py --model-dir results/train/resnet18_v2`.
-   - v2 replaces v1 as arm A only if its G3 is GO; otherwise Noor decides before the freeze.
-Then the freeze, Sun Oct 25 by 9 pm (plan step 9): freeze record and hashes, and a dry run on the Spark from the
-package.
+1. **Noor asks Shamar (blocks the live run).** Draft, short and plain, not sent:
+   > Hi Shamar, for Monday: when the camera saves an image, which folder on the GB10 does it land in, and is it the
+   > 1920×1080 image (a new file each time, or one file that gets overwritten)? Can we copy one 250 MB folder from a
+   > USB stick onto the GB10 before 12:30, and is there a screen where we can open an image? Thanks, Noor
+2. **Saturday: v2 attempt (offline arm A only).** Target the two G3 failure modes on the render side (real empty
+   holes read as uncapped vials, mostly the lighter top-row interiors; real seated caps read as crooked); compare
+   real and synthetic crops first (development on DEV runs 1–3 is allowed, D033). The render camera stays the
+   640×480 CapSealCam (D039 brings 1080 frames into that grid). **Ask Noor before starting a Brev instance (~$7).**
+   Record v2 as a new decision before its G3; run G3 once (`g3_check.py --model-dir results/train/resnet18_v2`).
+3. **Sunday by 9 pm: freeze** (plan step 9): freeze record + hashes, tag locally. Then **rebuild the package from the
+   freeze commit** (`../.venv/bin/python gb10/build_package.py`) and dry-run it on the Spark in a fresh folder:
+   bootstrap → `PREFLIGHT OK`; DEV run 1 replay identical to the Mac; folder mode with the still. Copy the tar and its
+   `.sha256` to the USB stick and check it there.
+4. **Monday Oct 26:** `LIVE_RUNBOOK.md` §7. Staged images are only copied off (with sha256), never run on the day; the
+   live run starts after staging; folder mode ignores the staged images already in the camera folder.
+5. **Monday evening:** adjudicate and lock the staged labels (CSV + sha256), then score every arm once (§5).
 
 ## Milestones (proposed) — revised Oct 23
-Oct 22 GPU gate run 1 · Oct 23 gate run 2 (closed, D037), training renders, ResNet-18 v1, G3 NO-GO, live runtime (done)
-· Oct 24 1080 mapping, GB10 package + Spark rehearsal, v2 attempt · Oct 25 **freeze by 9 pm**, dry run on the Spark ·
+Oct 22 GPU gate run 1 · Oct 23 gate run 2 (closed, D037), training renders, ResNet-18 v1, G3 NO-GO, live runtime,
+1080 frames (D039), GB10 package + Spark rehearsal (done) · Oct 24 v2 attempt, CSI's answer · Oct 25 **freeze by 9 pm**,
+package rebuilt from the freeze commit, dry run on the Spark ·
 **Mon Oct 26 12:30–2 pm CSI visit (confirmed; Noor + Tony): staged sealed test + live run on CSI's GB10** · Oct 26–27
 adjudicate labels, score every arm once · Oct 28–29 backup slot if needed (unconfirmed); error analysis; business case
 · Oct 30 final evaluation write-up · Oct 31 video, one-page summary, docs · **Sun Nov 1 11:59 pm CT final submission**
@@ -293,8 +283,9 @@ fallbacks F1–F4: proposal doc, "Go/no-go gates".
 fixture G01–G30. Claim: the twin cuts the real defect data and line time needed to commission inspection.
 - Offline (GPU): twin position map → Isaac renders with exact labels + randomization (`gen_scenes.py`) → synthetic-only
   ResNet-18 (thresholds from synthetic validation, D033) → freeze record.
-- Live (laptop): frame source → event gating (arm-clear frames) → 30 crops (`positions.py`) → inspector (ResNet-18;
-  rule baseline alongside) → fill state (`fill_state.py`, LIVE_FILL, D021) → operator map + trial log. No PLC
+- Live (CSI's GB10, from the package): frame source (1920×1080 → DEV 640×480 grid, D039) → event gating (arm-clear
+  frames) → 30 crops (`positions.py`) → inspector (rule baseline live; ResNet-18 scored offline) → fill state
+  (`fill_state.py`, LIVE_FILL, D021) → console grid + overlay + trial log. No PLC
   connection (D019), no connection to the plant network.
 - Scoring: every arm writes the same predictions CSV, scored once on sealed real data (`eval_metrics.py`).
 - Counterfactual / Vang's pipeline: optional, scored separately on eligible events + coverage (D034).
@@ -354,17 +345,19 @@ validation. `labels/dev_labels.csv` = DRAFT labels.
 - Dan Schneider's Oct 16 Brev org for Noor (as Ignite captain, $500): relation to `UWM/MSOE-Team-25` not confirmed —
   don't spend from two orgs without Noor saying so.
 - **YAAD GPU Lab** (CSI, free): 8 DGX Sparks (aarch64); team workspace exists, Noor joined Oct 22 (login above; VPN
-  first; files deleted after the event; put a password on any open port; use tmux for long jobs). Who drives the Spark:
-  undecided. Isaac Sim 6.0.0 and 5.1.0 images run on the Sparks (YAAD guide). **Correction:** usd-core 26.11 ships
+  first; files deleted after the event; put a password on any open port). Used Oct 23 for the GB10 rehearsal: key
+  ssh works; our workspace is a bare container (no python3, tmux, scp or rsync), so copy with `tar -cf - … | ssh … 'tar
+  -xf - -C …'` and run long jobs with `setsid nohup … &`. Isaac Sim 6.0.0 and 5.1.0 images run on the Sparks (YAAD guide). **Correction:** usd-core 26.11 ships
   Linux aarch64 wheels for Python 3.11–3.14 (not 3.10), so `gen_scenes.py` can run in a Spark venv with Python ≥3.11
   (not yet tried). Renders made on a Spark must be checked against the Brev check renders before training on them.
-- UWM GB10 (Shamar): no access; `GB10_PREFLIGHT.md` ready. build.nvidia.com usable. AI tool accounts per team: pending.
+- CSI's GB10 (Shamar): no access before Monday; our software runs there from the package (`LIVE_RUNBOOK.md` §7).
+  build.nvidia.com usable. AI tool accounts per team: pending.
 
 ## Source of truth and paths
 - Ignite repo: https://github.com/ALL-Applied-AI-Network/msoe-ai-club-rockwell-automation-nvidia-hackath-new-team-11-b020278d03
   · `main` @ `2a935de` (unchanged) · `feat/organizer-feedback-integration` @ `2189e3a` (also on origin; PR #1's work) ·
-  `feat/scene-generator` @ `d623eb4` (merged into the next) · **`feat/live-runtime` = the work branch** — both **local
-  only**.
+  `feat/scene-generator` @ `d623eb4` (merged into the next) · **`feat/live-runtime` = the work branch** (1080 map
+  `5cc73fb`, D039 `2504904`, GB10 package `a72c51b`…`23b6764`, Monday readiness after) — both **local only**.
 - Local clone `~/code/ignite`, project dir `twin_to_line/`, venv `~/code/ignite/.venv` (Python 3.11, usd-core 26.08,
   NumPy 2.4.6, OpenCV, torch 2.14.1 / torchvision 0.29.1 with MPS). Repo-root `README.md` is the organizers' — leave it.
 - Data (not in git): twin `~/Downloads/csi_digital_twin/csi_digital_twin_v1/` (station sha256 `293d74ba…`, camera JSON
@@ -381,24 +374,30 @@ validation. `labels/dev_labels.csv` = DRAFT labels.
 git status -sb                                   # expect: ## feat/live-runtime  +  " M twin_to_line/dose_sets.py"
 shasum -a 256 -c MANIFEST.sha256                 # expect: 8 lines ending OK (gate-v2.0.2)
 shasum -a 256 -c PROTOTYPE_SNAPSHOT.sha256       # expect: 4 x OK
-IGNITE_TWIN=~/Downloads/csi_digital_twin/csi_digital_twin_v1 ../.venv/bin/python -m pytest tests -q   # expect: 125 passed
+IGNITE_TWIN=~/Downloads/csi_digital_twin/csi_digital_twin_v1 ../.venv/bin/python -m pytest tests -q   # expect: 161 passed
 ../.venv/bin/python gen_scenes.py ~/Downloads/csi_digital_twin/csi_digital_twin_v1 --selftest            # expect: selftest passed
 ../.venv/bin/python eval_metrics.py --selftest
 ../.venv/bin/python inspect_frame.py --run 1 --events [--track]      # DEV runs only
 ../.venv/bin/python live_inspect.py --source replay:results/live/replay_run1 --labels labels/dev_labels.csv --out <new dir>   # LIVE_RUNBOOK.md §0.4
+../.venv/bin/python gb10/build_package.py         # GB10 package from HEAD (runtime files committed) -> results/gb10_pkg/
+../.venv/bin/python live_inspect.py --preflight <pkg>/preflight --out <dir>   # package self-check (bootstrap runs it)
+../.venv/bin/python register_1080.py              # re-checks the frozen 1080 transform; refuses to replace it
+../.venv/bin/python replay_1080.py make results/live/replay_run1 results/live/replay_run1_1080   # DEV frames only
 ssh yt-codecrusaders6286@172.30.102.94           # YAAD Spark; FortiClient VPN connected first
 ```
 
 ## Known risks
-- **The live runtime only handles 640×480; the CSI streams are 320×240 and 1920×1080.** Without the 1080 map (NEXT
-  ACTION 1), Monday is data collection only. Freeze: Sun Oct 25, 9 pm.
-- **It runs on CSI's GB10 with no setup time:** an untested aarch64 machine. Rehearse the package on the YAAD Spark
-  (NEXT ACTION 2). How frames reach it is unknown.
+- **How frames reach our process on CSI's GB10 is unknown** (folder; new files or one rewritten name; which stream).
+  Folder mode reads each file name once. Without a folder there is no live run; the staged images are unaffected.
+- **CSI's GB10 itself is untested:** the package passed on the YAAD Spark and in Ubuntu 22.04/24.04 containers, but
+  user rights, USB mounting and a screen there are unknown. Freeze: Sun Oct 25, 9 pm.
+- **No real 1080 frame with caps yet** (D039): only the empty still and 1080 copies of DEV frames. The 320×240 stream
+  is not supported (`wrong_size`).
 - **The ResNet doesn't transfer (G3 NO-GO).** The training set was rendered with the 640×480 camera; v2 is a Saturday
   attempt, offline arm only.
 - Isaac/launchable version may differ from 6.0 (recorded, not a reason to change the kit); Isaac in Docker → run inside
   it with `ISAAC_PY=…`; Drive download on the instance may fail → `brev copy` the twin zip.
-- `render_keep.py` restarts Isaac per scene → batch renderer needed before 300+ renders.
+- Renders: `render_batch.py` (one Isaac session, 7.1 s/scene for `train_v1`); `render_keep.py` restarts Isaac per scene.
 - UsdPreviewSurface material/light overrides and liquid may render differently in RTX (check renders).
 - Crooked caps below ~20° may be physically unresolvable from this camera (D005/D006/D023); real caps may not hold a
   chosen tilt → stage the natural tilt and measure it from the side photo.

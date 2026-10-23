@@ -198,9 +198,10 @@ class FolderSource(unittest.TestCase):
                 f.write(data[:len(data) // 2]); f.flush(); time.sleep(0.6); f.write(data[len(data) // 2:])
             done[name(5)] = time.monotonic()
 
-        th = threading.Thread(target=writer); th.start()
         s, out = session(); picked = []
-        for path, img in L.watch(d, poll=0.1, idle_exit=1.5):
+        frames = L.watch(d, poll=0.1, idle_exit=1.5)                            # empty folder at start
+        th = threading.Thread(target=writer); th.start()
+        for path, img in frames:
             picked.append((os.path.basename(path), time.monotonic(), s.process_frame(path, img)["status"]))
         th.join(); s.close()
         self.assertEqual([p[0] for p in picked], [name(k) for k in range(6)])
@@ -214,7 +215,7 @@ class FolderSource(unittest.TestCase):
         cv2.imwrite(os.path.join(d, name(1)), np.zeros((240, 320, 3), np.uint8))           # wrong size
         cv2.imwrite(os.path.join(d, name(2)), fixture([1]))
         s, out = session()
-        L.run(s, L.watch(d, poll=0.05, idle_exit=0.6, give_up_s=0.3))
+        L.run(s, L.watch(d, poll=0.05, idle_exit=0.6, give_up_s=0.3, skip=()))      # files written before the start
         st = {r["input_file"]: r["status"] for r in read_csv(os.path.join(out, "trial_log.csv"))}
         self.assertEqual(st, {name(0): "unreadable", name(1): "wrong_size", name(2): "scored"})
 

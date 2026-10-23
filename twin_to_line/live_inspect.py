@@ -10,7 +10,8 @@ fill-sequence state (LIVE_FILL, D021) -> predictions CSV + trial log + operator 
 Sources (one code path after decoding: Session.process_frame):
   replay:DIR  every image in DIR in frame-time order, as fast as it runs
   folder:DIR  watches DIR; a new image is read once its size is unchanged for one poll and its end marker
-              (JPEG FFD9 / PNG IEND) is present, so a half-written file is never read
+              (JPEG FFD9 / PNG IEND) is present, so a half-written file is never read. Images already in DIR at
+              start are ignored (the camera folder still holds the staged test images); session.json counts them
 Frame time: from a video frame id (cap_seal_video_1.mp4@t0612.0.png) or a CSI still name
 (cap_seal_20260922_192843_993721.jpg); otherwise the file's modification time.
 Frame size (the 'path' column of the trial log):
@@ -30,7 +31,10 @@ Outputs in --out (default results/live/<UTC time>):
   predictions.csv     one row per position per event (inspect_frame.py schema; eval_metrics.py reads it)
   trial_log.csv       one row per input frame, every attempt: status, event, per-position state + score, expected
                       state (--labels), latency, notes; an empty 'intervention' column for the operator
-  overlay_latest.png  operator view of the latest event (30 coloured boxes + legend); overlays/eNN_<frame>.png
+  console             operator view: per event, the 30 holes in the camera layout (G26 ... G01 across the top row)
+                      with a short state each, then the counts
+  overlay_latest.png  the latest event's overlay (30 coloured boxes + legend), replaced atomically (temp + rename);
+                      overlays/eNN_<frame>.png; view.html reloads overlay_latest.png every second over file://
   session.json        configuration, code / thresholds / map hashes, counts
 Data rule (D011): a frame that is in the dataset index but not in DEV runs 1-3 is refused, so runs 4-5 are never
 processed; images from outside the dataset (staged / live captures) are accepted.
@@ -70,6 +74,26 @@ TRIAL_FIELDS = (["time_utc", "session", "git", "inspector", "model_sha256", "inp
                 + [f"pred_{p}" for p in IDS] + [f"exp_{p}" for p in IDS] + ["path", "note", "intervention"])
 PATH_640, PATH_1080 = "640", "1080->640"
 ARCHIVE_COMMIT = os.path.join(P.HERE, "ARCHIVE_COMMIT")      # filled in by `git archive` (export-subst)
+GRID_CODE = {"PASS": "ok", "DEFECT": "DEF", "MISSED": "MISS", "UNSURE": "??", "WAITING": "."}
+GRID_ANSI = {"PASS": "32", "DEFECT": "1;31", "MISSED": "1;35", "UNSURE": "1;33", "WAITING": "2"}
+VIEW_HTML = "view.html"
+VIEW_PAGE = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Twin-to-Line live view: {session}</title>
+<style>body{{margin:0;background:#111;color:#ddd;font:14px sans-serif}}#s{{padding:6px 10px}}
+img{{display:block;max-width:100vw;max-height:calc(100vh - 32px);margin:auto}}</style></head>
+<body><div id="s">{session}: waiting for the first event</div><img id="v" alt="">
+<script>
+// live_inspect.py replaces overlay_latest.png atomically after every event; reload it every second.
+// A load that fails (no event yet) keeps the last image on screen.
+const v = document.getElementById("v"), s = document.getElementById("s");
+function tick() {{
+  const n = new Image();
+  n.onload = () => {{ v.src = n.src; s.textContent = "{session}: overlay_latest.png, checked " + new Date().toLocaleTimeString(); }};
+  n.src = "overlay_latest.png?t=" + Date.now();
+}}
+tick(); setInterval(tick, 1000);
+</script></body></html>
+"""
 PREFLIGHT_SETS = (("still_1080", PATH_1080), ("run1_640", PATH_640), ("run1_1080", PATH_1080))
 
 
@@ -157,11 +181,18 @@ def replay(folder, ix=None):
     return ((p, cv2.imread(p)) for p in paths)
 
 
-def watch(folder, poll=0.25, idle_exit=None, give_up_s=3.0):
+def watch(folder, poll=0.25, idle_exit=None, give_up_s=3.0, skip=None):
     """(path, image) for each new image in folder, in arrival order, once its size is unchanged for one poll and
     it is complete; a file that stays incomplete for give_up_s is passed on anyway (logged as unreadable or as
-    what it decodes to). Runs until Ctrl-C, or until no new file has arrived for idle_exit seconds."""
-    seen, sizes, last = set(), {}, time.monotonic()
+    what it decodes to). Runs until Ctrl-C, or until no new file has arrived for idle_exit seconds.
+    Images already in the folder when watch() is called are never read (CSI's camera folder still holds the staged
+    test images); skip = the names to ignore instead (() reads everything)."""
+    seen = {n for n in os.listdir(folder) if is_image(n)} if skip is None else set(skip)
+    return _watch(folder, poll, idle_exit, give_up_s, seen)
+
+
+def _watch(folder, poll, idle_exit, give_up_s, seen):
+    sizes, last = {}, time.monotonic()
     while True:
         for n in sorted(os.listdir(folder)):
             p = os.path.join(folder, n)
@@ -221,6 +252,23 @@ class EventGate:
         return "event", self.first, changed
 
 
+def console_grid(res, color=False):
+    """Operator view for the console: the 30 holes in the camera layout (G26 ... G01 across the top row, as in the
+    staging doc), one short state each, then the counts."""
+    st = {p["position"]: p["final_state"] for p in res["positions"]}
+    rows = []
+    for r in range(5):
+        cells = []
+        for c in range(6):
+            pid = f"G{(5 - c) * 5 + r + 1:02d}"; cell = f"{pid} {GRID_CODE[st[pid]]:<4s}"
+            cells.append(f"\x1b[{GRID_ANSI[st[pid]]}m{cell}\x1b[0m" if color else cell)
+        rows.append("    " + "  ".join(cells))
+    n = Counter(st.values())
+    rows.append("    " + "  ".join(f"{s} {n.get(s, 0)}" for s in ("PASS", "DEFECT", "MISSED", "UNSURE", "WAITING"))
+                + "    (" + "  ".join(f"{GRID_CODE[s]} = {s}" for s in GRID_CODE) + ")")
+    return "\n".join(rows)
+
+
 def expected_states(path):
     """{(frame, position): expected final state} from a labels CSV (eval_metrics ground-truth columns)."""
     with open(path, newline="") as f:
@@ -259,6 +307,8 @@ class Session:
         self.git, self.model_sha = code_version(), next(iter(insp_info["files"].values()), "")
         self.events, self.counts, self.latency, self.stop_reason = 0, Counter(), [], "end of source"
         os.makedirs(os.path.join(out, "overlays"), exist_ok=True)
+        with open(os.path.join(out, VIEW_HTML), "w") as f:
+            f.write(VIEW_PAGE.format(session=self.name))
         self.preds = CsvLog(os.path.join(out, "predictions.csv"), PRED_FIELDS)
         self.trial = CsvLog(os.path.join(out, "trial_log.csv"), TRIAL_FIELDS)
         self.info = {"session": self.name, "started_utc": self.now(), "source": source, "gate": gate, "mode": mode,
@@ -343,6 +393,7 @@ class Session:
             c = Counter(p["final_state"] for p in pos)
             print(f"event {self.events:2d} {name[-34:]:>34s} K={res['K']:2d} delay {row['event_delay_s']:5.1f}s  "
                   + " ".join(f"{s}={n}" for s, n in sorted(c.items())))
+            print(console_grid(res, color=sys.stdout.isatty()), flush=True)
         return row
 
     def close(self):
@@ -470,7 +521,14 @@ if __name__ == "__main__":
         if kind not in ("replay", "folder") or not os.path.isdir(folder):
             ap.error("--source must be replay:DIR or folder:DIR with an existing DIR")
         ix = dataset_index()
-        frames = replay(folder, ix) if kind == "replay" else watch(folder, a.poll, a.idle_exit)
+        old = sorted(n for n in os.listdir(folder) if is_image(n)) if kind == "folder" else []
+        frames = replay(folder, ix) if kind == "replay" else watch(folder, a.poll, a.idle_exit, skip=old)
         out = a.out or os.path.join(P.HERE, "results", "live", datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
         insp = make_inspector(a.inspector, a.threshold, a.model_dir, a.device)
-        run(Session(out, a.source, a.run_id, a.gate, a.mode, a.track, a.labels, a.note, ix=ix, inspector=insp), frames)
+        s = Session(out, a.source, a.run_id, a.gate, a.mode, a.track, a.labels, a.note, ix=ix, inspector=insp)
+        if kind == "folder":
+            s.write_info(ignored_existing_images=len(old))
+            print(f"watching {folder}: {len(old)} image(s) already there are ignored; new images only")
+        print(f"operator view: this console (one grid per event), {os.path.join(out, 'overlay_latest.png')}, "
+              f"or {os.path.join(os.path.abspath(out), VIEW_HTML)} in a browser")
+        run(s, frames)

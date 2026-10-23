@@ -1,4 +1,4 @@
-import csv, json, os, shutil, subprocess, sys, tempfile, threading, time, unittest, unittest.mock
+import csv, itertools, json, os, shutil, subprocess, sys, tempfile, threading, time, unittest, unittest.mock
 from datetime import datetime, timedelta
 import cv2, numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -16,6 +16,8 @@ EVENTS = os.path.join(P.HERE, "results", "prototype", "events")
 DEV_STILLS = [os.path.join(EVENTS, "cap_seal_video_1.mp4@t1050.0.png"), os.path.join(EVENTS, "cap_seal_video_1.mp4@t0464.0.png")]
 RUN3_EMPTY = "cap_seal_20260923_184630_557477.jpg"
 REPLAY1 = os.path.join(P.HERE, "results", "live", "replay_run1")
+VIDEO1 = os.path.join(R.REAL_ROOT, "videos", "cap_seal_video_1.mp4")
+EVENTS1 = os.path.join(EVENTS, "events_run1_video.csv")
 PY = sys.executable
 DEV = os.path.exists(os.path.join(R.REAL_ROOT, "image_index.csv")) and all(map(os.path.exists, DEV_STILLS))
 
@@ -209,6 +211,92 @@ class OperatorView(unittest.TestCase):
         self.assertGreater(reads[0], 0); self.assertEqual(bad[0], 0)
         self.assertFalse(os.path.exists(os.path.join(out, ".overlay_latest.png")))
         self.assertTrue(os.path.exists(os.path.join(out, L.VIEW_HTML)))
+
+
+class OverwrittenFile(unittest.TestCase):
+    def test_one_name_rewritten_three_times_gives_three_frames(self):
+        d = tempfile.mkdtemp(); f = os.path.join(d, "latest.png")
+        frames = L.watch(d, poll=0.05, idle_exit=1.0)
+
+        def camera():                                                          # rewrites the same file in place
+            for k in (1, 2, 3):
+                time.sleep(0.4)
+                data = cv2.imencode(".png", fixture(range(1, k + 1)))[1].tobytes()
+                with open(f, "wb") as fh:
+                    fh.write(data)
+
+        th = threading.Thread(target=camera); th.start()
+        out = tempfile.mkdtemp(); L.run(L.Session(out, gate="each", ix=None, quiet=True), frames); th.join()
+        log = read_csv(os.path.join(out, "trial_log.csv"))
+        self.assertEqual([r["input_file"] for r in log], ["latest.png"] * 3)
+        self.assertEqual([r["K"] for r in log], ["1", "2", "3"])                # each version read once, whole
+
+    def test_an_old_file_rewritten_after_the_start_is_read(self):
+        d = tempfile.mkdtemp(); f = os.path.join(d, "latest.png"); cv2.imwrite(f, fixture([1]))
+        frames = L.watch(d, poll=0.05, idle_exit=0.8)                           # the old version is ignored
+        time.sleep(0.05); cv2.imwrite(f, fixture([1, 2]))
+        out = tempfile.mkdtemp(); L.run(L.Session(out, gate="each", ix=None, quiet=True), frames)
+        self.assertEqual([r["K"] for r in read_csv(os.path.join(out, "trial_log.csv"))], ["2"])
+
+
+class FakeCap:
+    def __init__(self, frames=(), opened=True):
+        self.frames, self.opened = list(frames), opened
+
+    def isOpened(self):
+        return self.opened
+
+    def read(self):
+        time.sleep(0.01)
+        return (True, self.frames.pop(0)) if self.frames else (False, None)
+
+    def release(self):
+        pass
+
+
+class StreamSource(unittest.TestCase):
+    def test_drop_cannot_open_and_exception_are_logged_and_reconnected(self):
+        hd = warp_up(fixture([1, 2]), FWARP)                                    # the camera sends 1920x1080
+        caps = iter([FakeCap([hd] * 5), FakeCap(opened=False), RuntimeError("driver hiccup"), FakeCap([hd] * 2000)])
+
+        def opener(src):
+            c = next(caps)
+            if isinstance(c, Exception):
+                raise c
+            return c
+
+        logs, stats = [], {}
+        g = L.stream("rtsp://fake/cam", every=0.1, reconnect_s=0.05, log=logs.append, stats=stats, opener=opener)
+        out = tempfile.mkdtemp(); L.run(L.Session(out, gate="each", ix=None, quiet=True), itertools.islice(g, 6)); g.close()
+        text = "\n".join(logs)
+        for want in ("connected, 1920x1080", "dropped after 5 frames", "cannot open", "RuntimeError: driver hiccup"):
+            self.assertIn(want, text)
+        self.assertEqual((stats["connects"], stats["drops"]), (2, 1))
+        log = read_csv(os.path.join(out, "trial_log.csv"))
+        self.assertEqual(len(log), 6)
+        self.assertEqual({(r["path"], r["status"]) for r in log}, {("1080->640", "scored")})
+        self.assertTrue(all(r["input_file"].startswith("stream_") for r in log))
+        t = [float(r["frame_t"]) for r in log]; self.assertEqual(t, sorted(t))
+
+    def test_holdout_video_refused_before_decoding(self):
+        root = tempfile.mkdtemp(); os.makedirs(os.path.join(root, "images"))
+        open(os.path.join(root, "image_index.csv"), "w").write("filename,timestamp,video_id\n")
+        ix, d = R.Index(root), tempfile.mkdtemp()
+        for run in ("1", "4", "5"):
+            open(os.path.join(d, f"cap_seal_video_{run}.mp4"), "wb").close()
+        self.assertIsNone(L.stream_refusal(ix, os.path.join(d, "cap_seal_video_1.mp4")))
+        for run in ("4", "5"):
+            self.assertIn("DEV runs 1-3", L.stream_refusal(ix, os.path.join(d, f"cap_seal_video_{run}.mp4")))
+        self.assertIsNone(L.stream_refusal(ix, "rtsp://cam/stream"))           # live sources are never dataset frames
+
+    @unittest.skipUnless(os.path.exists(VIDEO1) and os.path.exists(EVENTS1), "needs the DEV run 1 video")
+    def test_dev_run1_video_file_same_events_as_the_replay(self):
+        out = tempfile.mkdtemp(); ix = R.Index()
+        self.assertIsNone(L.stream_refusal(ix, VIDEO1))
+        L.run(L.Session(out, ix=ix, quiet=True), L.stream(VIDEO1, every=1.0))
+        log = read_csv(os.path.join(out, "trial_log.csv"))
+        self.assertEqual(len(log), 1123)
+        self.assertEqual([r["event_frame"] for r in log if r["status"] == "scored"], [r["frame"] for r in read_csv(EVENTS1)])
 
 
 if __name__ == "__main__":

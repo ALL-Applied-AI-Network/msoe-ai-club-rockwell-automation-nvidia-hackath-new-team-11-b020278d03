@@ -169,6 +169,14 @@ YAAD team code).
     (Python 3.10) and 24.04 (3.12) containers on the Mac: `PREFLIGHT OK`, identical to the Mac.
   - Spark folder `/workspace/ttl_rehearsal_1023` (4.5 GB: packages, DEV run 1 frames + 1080 copy, a runs-1–3-only
     index) is kept for the Sunday dry run; delete it after the event.
+- **Frame sources (Oct 23).** Folder mode re-reads a file rewritten under the same name (mtime or size;
+  a read that races a rewrite is dropped). `--source stream:<url|device|file>` (cv2.VideoCapture): a live source is read
+  in a thread, the newest frame passed on every `--every` s, drops logged and reconnected; a video file gives one frame
+  per `--every` s of its own timestamps. DEV run 1 video as a file: same 18 events and states as the replay. Local
+  MJPEG-over-HTTP server: connect, event, drop, reconnect, Ctrl-C all fine. **Untested on a live camera.** The cp311 and
+  cp312 aarch64 wheels decode the run 1 mp4 in an Ubuntu 24.04 arm64 container (33,662 frames, identical between the
+  two) with the same 18 events as the Mac; 3 of 540 holes at rule thresholds changed state (the decode differs
+  slightly from macOS).
 - **Monday readiness in `live_inspect.py` (Oct 23).** Staged stills with `--gate each` (no `--track`) are scored each on
   their own (tested). Folder mode ignores images already in the folder at start (the camera folder will hold the staged
   images). Operator view: a console grid per event in the camera layout (primary), the overlay replaced atomically,
@@ -374,7 +382,7 @@ validation. `labels/dev_labels.csv` = DRAFT labels.
 git status -sb                                   # expect: ## feat/live-runtime  +  " M twin_to_line/dose_sets.py"
 shasum -a 256 -c MANIFEST.sha256                 # expect: 8 lines ending OK (gate-v2.0.2)
 shasum -a 256 -c PROTOTYPE_SNAPSHOT.sha256       # expect: 4 x OK
-IGNITE_TWIN=~/Downloads/csi_digital_twin/csi_digital_twin_v1 ../.venv/bin/python -m pytest tests -q   # expect: 161 passed
+IGNITE_TWIN=~/Downloads/csi_digital_twin/csi_digital_twin_v1 ../.venv/bin/python -m pytest tests -q   # expect: 166 passed
 ../.venv/bin/python gen_scenes.py ~/Downloads/csi_digital_twin/csi_digital_twin_v1 --selftest            # expect: selftest passed
 ../.venv/bin/python eval_metrics.py --selftest
 ../.venv/bin/python inspect_frame.py --run 1 --events [--track]      # DEV runs only
@@ -387,8 +395,10 @@ ssh yt-codecrusaders6286@172.30.102.94           # YAAD Spark; FortiClient VPN c
 ```
 
 ## Known risks
-- **How frames reach our process on CSI's GB10 is unknown** (folder; new files or one rewritten name; which stream).
-  Folder mode reads each file name once. Without a folder there is no live run; the staged images are unaffected.
+- **How frames reach our process on CSI's GB10 is unknown** (folder; new files or one rewritten name; a live stream).
+  Covered by one pipeline (`LIVE_RUNBOOK.md` §7 step 5 table): folder mode (re-reads a rewritten file), `stream:`
+  (RTSP/HTTP/device; **untested on a live camera**), stills on request with `--gate each`. The GB10's aarch64 OpenCV
+  decodes video slightly differently from the Mac (DEV run 1: 3 of 540 holes at rule thresholds changed state).
 - **CSI's GB10 itself is untested:** the package passed on the YAAD Spark and in Ubuntu 22.04/24.04 containers, but
   user rights, USB mounting and a screen there are unknown. Freeze: Sun Oct 25, 9 pm.
 - **No real 1080 frame with caps yet** (D039): only the empty still and 1080 copies of DEV frames. The 320×240 stream

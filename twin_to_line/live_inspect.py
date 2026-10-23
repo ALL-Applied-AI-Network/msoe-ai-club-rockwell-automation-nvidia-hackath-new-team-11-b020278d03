@@ -3,6 +3,7 @@ fill-sequence state (LIVE_FILL, D021) -> predictions CSV + trial log + operator 
 
     python live_inspect.py --source replay:DIR [--labels labels/dev_labels.csv] [--out DIR]
     python live_inspect.py --source folder:DIR [--poll 0.25] [--idle-exit S]
+    python live_inspect.py --source stream:URL|DEVICE|FILE [--every 1.0] [--idle-exit S]
         [--inspector rule|resnet] [--threshold d038|preregistered] [--model-dir DIR] [--device mps|cpu]
     python live_inspect.py --export-replay 1 --out results/live/replay_run1 [--from video|stills] [--step 1.0]
     python live_inspect.py --preflight PKG/preflight --out DIR      (GB10 package self-check, LIVE_RUNBOOK.md section 7)
@@ -11,7 +12,12 @@ Sources (one code path after decoding: Session.process_frame):
   replay:DIR  every image in DIR in frame-time order, as fast as it runs
   folder:DIR  watches DIR; a new image is read once its size is unchanged for one poll and its end marker
               (JPEG FFD9 / PNG IEND) is present, so a half-written file is never read. Images already in DIR at
-              start are ignored (the camera folder still holds the staged test images); session.json counts them
+              start are ignored (the camera folder still holds the staged test images); session.json counts them.
+              A file written again under the same name (a camera overwriting one file) is read again
+  stream:SRC  cv2.VideoCapture: an RTSP / HTTP URL, a device (0, /dev/video0) or a video file. A live source is read
+              continuously in a thread and its newest frame is passed on every --every s (default 1.0); a drop is
+              logged as a WARNING and reconnected, never fatal. A video file gives one frame per --every s of its own
+              timestamps (real_data.iter_video: the same frames as --export-replay), as fast as it decodes
 Frame time: from a video frame id (cap_seal_video_1.mp4@t0612.0.png) or a CSI still name
 (cap_seal_20260922_192843_993721.jpg); otherwise the file's modification time.
 Frame size (the 'path' column of the trial log):
@@ -47,7 +53,7 @@ Preflight (--preflight): prints OS, CPU, glibc, Python, numpy / OpenCV versions 
 then scores the package's bundled frames (the 1080 still, 10 DEV run-1 event frames at 640 and as 1080 copies) with
 --gate each and compares every hole with the Mac's predictions shipped next to them. Exit 0 = PREFLIGHT OK.
 """
-import argparse, csv, hashlib, json, os, re, shutil, subprocess, sys, time
+import argparse, csv, hashlib, json, os, re, shutil, subprocess, sys, threading, time
 from collections import Counter
 from datetime import datetime, timezone
 import cv2, numpy as np
@@ -181,36 +187,145 @@ def replay(folder, ix=None):
     return ((p, cv2.imread(p)) for p in paths)
 
 
+def file_version(path):
+    """(mtime in ns, size): changes whenever the file is written again, even under the same name."""
+    st = os.stat(path)
+    return st.st_mtime_ns, st.st_size
+
+
 def watch(folder, poll=0.25, idle_exit=None, give_up_s=3.0, skip=None):
-    """(path, image) for each new image in folder, in arrival order, once its size is unchanged for one poll and
-    it is complete; a file that stays incomplete for give_up_s is passed on anyway (logged as unreadable or as
-    what it decodes to). Runs until Ctrl-C, or until no new file has arrived for idle_exit seconds.
-    Images already in the folder when watch() is called are never read (CSI's camera folder still holds the staged
-    test images); skip = the names to ignore instead (() reads everything)."""
-    seen = {n for n in os.listdir(folder) if is_image(n)} if skip is None else set(skip)
+    """(path, image) for each new image in folder, in arrival order, once it is unchanged for one poll and complete;
+    a file that stays incomplete for give_up_s is passed on anyway (logged as unreadable or as what it decodes to).
+    A file written again under the same name (new mtime or size: a camera that overwrites one file) is read again,
+    after the same checks. Runs until Ctrl-C, or until nothing new has arrived for idle_exit seconds.
+    Images already in the folder when watch() is called are not read unless they are written again (CSI's camera
+    folder still holds the staged test images); skip = the names to ignore instead (() reads everything)."""
+    names = [n for n in os.listdir(folder) if is_image(n)] if skip is None else skip
+    seen = {}
+    for n in names:
+        try:
+            seen[n] = file_version(os.path.join(folder, n))
+        except OSError:
+            pass
     return _watch(folder, poll, idle_exit, give_up_s, seen)
 
 
 def _watch(folder, poll, idle_exit, give_up_s, seen):
-    sizes, last = {}, time.monotonic()
+    """seen: {name: version} of what was read (or ignored at start); pending: {name: (version, first seen)}."""
+    pending, last = {}, time.monotonic()
     while True:
         for n in sorted(os.listdir(folder)):
-            p = os.path.join(folder, n)
-            if n in seen or not is_image(n):
+            if not is_image(n):
                 continue
+            p = os.path.join(folder, n)
             try:
-                s = os.path.getsize(p)
+                v = file_version(p)
             except OSError:
                 continue
+            if seen.get(n) == v:
+                continue
             now = time.monotonic()
-            if s > 0 and n in sizes and sizes[n][0] == s and (complete(p) or now - sizes[n][1] >= give_up_s):
-                seen.add(n); del sizes[n]; last = now
-                yield p, cv2.imread(p)
-            elif n not in sizes or sizes[n][0] != s:
-                sizes[n] = (s, now)
+            if v[1] > 0 and n in pending and pending[n][0] == v and (complete(p) or now - pending[n][1] >= give_up_s):
+                img = cv2.imread(p)
+                try:
+                    unchanged = file_version(p) == v
+                except OSError:
+                    unchanged = False
+                if not unchanged:                       # rewritten while being read: take the next version instead
+                    pending.pop(n, None); continue
+                seen[n] = v; del pending[n]; last = now
+                yield p, img
+            elif n not in pending or pending[n][0] != v:
+                pending[n] = (v, now)
         if idle_exit is not None and time.monotonic() - last > idle_exit:
             return
         time.sleep(poll)
+
+
+def open_capture(src):
+    """cv2.VideoCapture for stream:SRC: a device number ('0') or a URL / device path / file."""
+    return cv2.VideoCapture(int(src) if src.isdigit() else src)
+
+
+class LatestFrame:
+    """Reads a live source continuously in a thread and keeps only its newest frame, so a slow consumer never works on
+    stale buffered video. A failed open or read is logged and retried after reconnect_s; the thread never raises."""
+
+    def __init__(self, src, reconnect_s=2.0, log=print, opener=open_capture):
+        self.src, self.reconnect_s, self.log, self.opener = src, reconnect_s, log, opener
+        self.lock, self.stopped = threading.Lock(), threading.Event()
+        self.frame = self.t = None
+        self.n = self.connects = self.drops = 0
+        self.thread = threading.Thread(target=self._run, daemon=True); self.thread.start()
+
+    def _run(self):
+        while not self.stopped.is_set():
+            cap, got = None, 0
+            try:
+                cap = self.opener(self.src)
+                if not cap.isOpened():
+                    self.log(f"WARNING stream {self.src}: cannot open; retrying in {self.reconnect_s:g} s")
+                else:
+                    self.connects += 1
+                    while not self.stopped.is_set():
+                        ok, img = cap.read()
+                        if not ok or img is None:
+                            break
+                        got += 1
+                        if got == 1:
+                            self.log(f"stream {self.src}: connected, {img.shape[1]}x{img.shape[0]}")
+                        with self.lock:
+                            self.frame, self.t, self.n = img, time.time(), self.n + 1
+                    if not self.stopped.is_set():
+                        self.drops += 1
+                        self.log(f"WARNING stream {self.src}: dropped after {got} frames; reconnecting in {self.reconnect_s:g} s")
+            except Exception as e:                              # never let the reader die
+                self.log(f"WARNING stream {self.src}: {type(e).__name__}: {e}; reconnecting in {self.reconnect_s:g} s")
+            finally:
+                try:
+                    cap is not None and cap.release()
+                except Exception:
+                    pass
+            self.stopped.wait(self.reconnect_s)
+
+    def latest(self):
+        with self.lock:
+            return self.n, self.frame, self.t
+
+    def stop(self):
+        self.stopped.set(); self.thread.join(timeout=5)
+
+
+def stream(src, every=1.0, idle_exit=None, reconnect_s=2.0, log=print, stats=None, opener=open_capture):
+    """(name, image, t) for stream:SRC. A video file: one frame per `every` s of its own timestamps (the frames of
+    real_data.iter_video, named like the replay frames). A live source: the newest frame every `every` s of wall
+    time, named stream_<UTC time>; a tick without a new frame passes nothing (idle_exit: stop after that many s)."""
+    if os.path.isfile(src):
+        base = os.path.basename(src)
+        for t, img in R.iter_video(src, every):
+            yield f"{base}@t{t:06.1f}", img, t
+        return
+    reader = LatestFrame(src, reconnect_s, log, opener)
+    last_n, tick = 0, time.monotonic(); last_new = tick
+    try:
+        while True:
+            tick = max(tick + every, time.monotonic()); time.sleep(max(0.0, tick - time.monotonic()))
+            n, img, t = reader.latest()
+            if n == last_n:
+                if idle_exit is not None and time.monotonic() - last_new > idle_exit:
+                    return
+                continue
+            last_n, last_new = n, time.monotonic()
+            yield "stream_" + datetime.fromtimestamp(t, timezone.utc).strftime("%Y%m%d_%H%M%S_%f"), img, t
+    finally:
+        reader.stop()
+        if stats is not None:
+            stats.update(connects=reader.connects, drops=reader.drops, frames_read=reader.n)
+
+
+def stream_refusal(ix, src):
+    """A dataset video outside DEV runs 1-3 is refused before anything is decoded (its frames carry the run)."""
+    return refusal(ix, f"{os.path.basename(src)}@t0000.0") if os.path.isfile(src) else None
 
 
 class EventGate:
@@ -423,13 +538,14 @@ def make_inspector(kind="rule", threshold="d038", model_dir=None, device=None, q
 
 
 def run(session, frames):
-    """Feed every (path, image) of a source through the session; Ctrl-C stops cleanly with all logs flushed."""
+    """Feed every (path, image[, t]) of a source through the session; Ctrl-C stops cleanly with all logs flushed."""
     try:
-        for path, img in frames:
-            session.process_frame(path, img)
+        for f in frames:
+            session.process_frame(*f)
     except KeyboardInterrupt:
         session.stop_reason = "ctrl-c"
     finally:
+        getattr(frames, "close", lambda: None)()                # stops a stream's reader thread
         session.close()
 
 
@@ -501,6 +617,7 @@ if __name__ == "__main__":
     ap.add_argument("--gate", choices=("events", "each"), default="events")
     ap.add_argument("--mode", choices=MODES, default=LIVE_FILL); ap.add_argument("--track", action="store_true")
     ap.add_argument("--poll", type=float, default=0.25); ap.add_argument("--idle-exit", type=float)
+    ap.add_argument("--every", type=float, default=1.0, help="stream: seconds between frames passed on")
     ap.add_argument("--note", default="")
     ap.add_argument("--export-replay", metavar="RUN"); ap.add_argument("--from", dest="from_", choices=("video", "stills"), default="video")
     ap.add_argument("--step", type=float, default=1.0)
@@ -518,17 +635,29 @@ if __name__ == "__main__":
         export_replay(a.export_replay, a.out, a.from_, a.step)
     else:
         kind, _, folder = (a.source or "").partition(":")
-        if kind not in ("replay", "folder") or not os.path.isdir(folder):
-            ap.error("--source must be replay:DIR or folder:DIR with an existing DIR")
+        if not (kind in ("replay", "folder") and os.path.isdir(folder) or kind == "stream" and folder):
+            ap.error("--source must be replay:DIR or folder:DIR with an existing DIR, or stream:URL|DEVICE|FILE")
         ix = dataset_index()
         old = sorted(n for n in os.listdir(folder) if is_image(n)) if kind == "folder" else []
-        frames = replay(folder, ix) if kind == "replay" else watch(folder, a.poll, a.idle_exit, skip=old)
+        stats = {}
+        if kind == "stream":
+            why = stream_refusal(ix, folder)
+            if why:
+                raise R.ProtectedDataError(why)
+            frames = stream(folder, a.every, a.idle_exit, stats=stats)
+        else:
+            frames = replay(folder, ix) if kind == "replay" else watch(folder, a.poll, a.idle_exit, skip=old)
         out = a.out or os.path.join(P.HERE, "results", "live", datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
         insp = make_inspector(a.inspector, a.threshold, a.model_dir, a.device)
         s = Session(out, a.source, a.run_id, a.gate, a.mode, a.track, a.labels, a.note, ix=ix, inspector=insp)
         if kind == "folder":
             s.write_info(ignored_existing_images=len(old))
             print(f"watching {folder}: {len(old)} image(s) already there are ignored; new images only")
+        elif kind == "stream":
+            print(f"stream {folder}: " + (f"video file, one frame per {a.every:g} s of its own timestamps" if os.path.isfile(folder)
+                  else f"live source, newest frame every {a.every:g} s; drops are logged and reconnected (Ctrl-C to stop)"))
         print(f"operator view: this console (one grid per event), {os.path.join(out, 'overlay_latest.png')}, "
               f"or {os.path.join(os.path.abspath(out), VIEW_HTML)} in a browser")
         run(s, frames)
+        if kind == "stream":
+            s.write_info(stream={"source": folder, "every_s": a.every, **stats})

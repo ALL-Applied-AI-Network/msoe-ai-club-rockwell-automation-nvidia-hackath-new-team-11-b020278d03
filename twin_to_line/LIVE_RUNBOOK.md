@@ -28,7 +28,7 @@ never writes into the image folder (R10).
    `shasum -a 256 -c FREEZE.sha256` → every line `OK` (R11; that file is written at the freeze).
 2. **Tests.**
    `IGNITE_TWIN=~/Downloads/csi_digital_twin/csi_digital_twin_v1 ../.venv/bin/python -m pytest tests -q`
-   → `161 passed` (or the count in the freeze record).
+   → `166 passed` (or the count in the freeze record).
 3. **Replay folder** (once; 569 MB, stays in `results/`, never committed):
    `../.venv/bin/python live_inspect.py --export-replay 1 --out results/live/replay_run1`
    → `run 1: 1123 frames (video) -> results/live/replay_run1`
@@ -150,8 +150,8 @@ never writes into the image folder (R10).
 - 1920×1080 is handled by the D039 warp; the 320×240 stream is not supported (`wrong_size`).
 - Operator view: the console grid (primary) and `view.html` (needs a browser on the GB10; checked in Chrome over
   http://127.0.0.1 because the test browser could not open `file://`).
-- If CSI's camera software rewrites one fixed file name instead of writing new files, folder mode reads that name
-  only once (it tracks names). Ask CSI how images are saved.
+- How frames arrive (new files, one rewritten file, a live stream, stills on request) decides the §7 step 5 command.
+  Folder mode re-reads a file written again under the same name; stream mode is untested on a live camera.
 - The frozen inspector and thresholds (R4); the full robustness tests (R8); the freeze record and hashes (R11).
 - Measured on this Mac (DEV run 1 replay): rule median 27 ms per scored image, ResNet (MPS) 74 ms; 1.3 ms per other
   image (R7 target ≤ 1 s); a 1920×1080 frame adds ~3.4 ms for the warp. ResNet start-up (torch, model load, warm-up)
@@ -211,9 +211,10 @@ for the results; printed staging list, label sheet and this section; paper log.
    cd ~/ttl/ttl_gb10_<sha>/code/twin_to_line
    PY=../../venv/bin/python
    ```
-2. **The camera folder.** `IN=/path/where/the/images/arrive` (from CSI). Check one image:
-   `ls -lt "$IN" | head -3` and `$PY -c "import cv2,sys; print(cv2.imread(sys.argv[1]).shape)" "$IN/<newest file>"`
-   → `(1080, 1920, 3)` (or `(480, 640, 3)`). Anything else (e.g. `(240, 320, 3)`): ask CSI for the 1920×1080 images.
+2. **How do frames arrive?** Ask CSI, then pick the row (step 5 uses it). Saved files: `IN=<the folder>`, and check
+   one image with `$PY -c "import cv2,sys; print(cv2.imread(sys.argv[1]).shape)" "$IN/<newest file>"` →
+   `(1080, 1920, 3)` (or `(480, 640, 3)`; anything else, e.g. `(240, 320, 3)`, is `wrong_size`: ask for 1920×1080).
+   A live stream: `SRC=<the URL or device>`.
 3. **12:30 staging.** Nothing of ours runs during staging. CSI saves one image per staged setup, in the camera
    folder `IN`. Noor and Tony fill the label sheet per setup (image file name ↔ setup).
 4. **Staged images: copy them off, don't run anything on them** (§5). Copy exactly the images on the label sheet:
@@ -226,25 +227,37 @@ for the results; printed staging list, label sheet and this section; paper log.
    ls ~/ttl/staged_20261026 | wc -l                 # -> 22
    ```
    Monday evening on the Mac: adjudicate and lock the labels, then score once per arm (§5).
-5. **Live run (events gate), only after staging is done.**
-   ```bash
-   cd ~/ttl/ttl_gb10_<sha>/code/twin_to_line
-   OUT=results/live/csi_live_$(date +%Y%m%d_%H%M%S)
-   $PY live_inspect.py --source folder:"$IN" --out "$OUT" --note "CSI live run, Oct 26"
-   ```
-   Expected: the inspector line; `watching <IN>: 22 image(s) already there are ignored; new images only` (the staged
-   images, plus anything else already there); the `operator view: ...` line; then nothing until the first event.
-   In a second terminal `tail -f "$OUT/trial_log.csv" | cut -d, -f6,8,77` shows one `<file>,<status>,1080->640` line
-   per new image within ~1 s (Spark: 0.3–0.4 s). After 4 s of a still fixture with the arm away:
+5. **Live run, only after staging is done.** Always from `~/ttl/ttl_gb10_<sha>/code/twin_to_line`, with
+   `OUT=results/live/csi_live_$(date +%Y%m%d_%H%M%S)` (a new one for every start) and the row that matches step 2:
+
+   | Frames arrive as | Command (`$PY live_inspect.py` + …) | Expected first lines (after the `inspector …` line) |
+   |---|---|---|
+   | New image files in a folder | `--source folder:"$IN" --out "$OUT"` | `watching <IN>: N image(s) already there are ignored; new images only` |
+   | One file rewritten again and again (same name) | the same command | the same; the trial log repeats that file name, one row per new version |
+   | A live video stream (RTSP / HTTP URL) — **untested on a live camera** | `--source stream:"$SRC" --every 1.0 --out "$OUT"` | `stream <SRC>: live source, newest frame every 1 s; …`, then `stream <SRC>: connected, 1920x1080` |
+   | A camera device on the GB10 (`0`, `/dev/video0`) — **untested on a live camera** | `--source stream:/dev/video0 --every 1.0 --out "$OUT"` | as for a stream |
+   | Stills saved only on request (CSI saves one image per fixture state) | `--source folder:"$IN" --gate each --out "$OUT"` | `watching <IN>: …`; then one event line + grid per saved still |
+   | Nothing reachable | no live run; staging is unaffected | — |
+
+   All rows go through the same path (size switch, D039 warp, event gate, rule) and print the `operator view: …` line,
+   then nothing until the first event. After 4 s of a still fixture with the arm away (`--gate each`: at once):
    `event N <frame> K=.. delay 4.0s ...` and under it the 6×5 grid (§2), the primary operator view. Extra, if the GB10
-   has a browser: `xdg-open "$OUT/view.html"` (reloads the latest overlay every second).
-   **If frames arrive only one at a time** (saved on a trigger, or seconds apart): look at
-   `cut -d, -f6,7,8 "$OUT/trial_log.csv"` (file, frame time, status).
-   - Images ≥ 4 s apart while the fixture stays the same: the event comes with the second image (its delay = the gap).
-   - Every image shows a new fixture state, or `frame_t` doesn't increase: the status stays `settling` and no event line
-     ever comes. Ctrl-C and start again into a **new** `OUT` with `--gate each`: every arm-clear image is then scored on
-     its own (Spark: scored 0.4 s after the file appeared). Images that arrived before the restart are ignored. Log
-     the restart as an intervention.
+   has a browser: `xdg-open "$OUT/view.html"` (reloads the latest overlay every second). In a second terminal
+   `tail -f "$OUT/trial_log.csv" | cut -d, -f6,8,77` shows one `<frame>,<status>,<path>` line per frame (folder: within
+   ~1 s of the file appearing, Spark 0.3–0.4 s; stream: one per `--every` s, named `stream_<UTC time>`).
+   - **Stream drops:** `WARNING stream <SRC>: dropped after N frames; reconnecting in 2 s` (or `cannot open; retrying`)
+     is logged and the stream is reopened; the run never stops by itself. FFmpeg may print its own lines (e.g.
+     `Stream ends prematurely`); they are harmless. If an RTSP stream keeps dropping, try
+     `export OPENCV_FFMPEG_CAPTURE_OPTIONS="rtsp_transport;tcp"` before the command. Checked Oct 23 only against a
+     local MJPEG-over-HTTP server (connect, event after 4.1 s, drop, reconnect, Ctrl-C) and the DEV run 1 video as a
+     file (same 18 events as the replay); the GB10's aarch64 OpenCV decodes video slightly differently from the Mac
+     (3 of 540 DEV holes, all at rule thresholds, changed state).
+   - **Files that arrive one at a time** (saved on a trigger, or seconds apart): look at
+     `cut -d, -f6,7,8 "$OUT/trial_log.csv"` (file, frame time, status). Images ≥ 4 s apart while the fixture stays the
+     same: the event comes with the second image (its delay = the gap). Every image a new fixture state, or `frame_t`
+     not increasing: the status stays `settling` and no event ever comes. Then Ctrl-C and start again into a **new**
+     `OUT` with `--gate each` (the "stills on request" row): every arm-clear image is scored on its own (Spark: 0.4 s
+     after the file appeared). Images that arrived before the restart are ignored. Log the restart as an intervention.
 6. **Stop.** Ctrl-C once → `N frames, M events, {...} -> <OUT>`; `session.json` has `"stop_reason": "ctrl-c"`.
 7. **Copy the results to the stick, with sha256.**
    ```bash

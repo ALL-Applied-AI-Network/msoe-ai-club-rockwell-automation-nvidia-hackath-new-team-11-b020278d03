@@ -37,7 +37,31 @@ YAAD team code).
   https://claude.ai/code/artifact/7e742133-103c-483e-8409-8aca3b5e131e (private until Noor shares it). Its Session A/B
   structure is superseded by D036.
 - **Brev access (Noor):** org **`UWM/MSOE-Team-25`**, **$500 shared credits**; Brev CLI **v0.6.337** on the Mac;
-  `brev login`, `brev refresh`, `brev list` OK (no instances). **Vang authorized creating a GPU instance.**
+  `brev login`, `brev refresh`, `brev list` OK. **Vang authorized creating a GPU instance.** CLI `brev launch` of the
+  Isaac Launchable failed 3× with "Internal Server Error" (g7e.2xlarge ×2, g6e.2xlarge); the console works.
+- **First GPU gate run (Oct 22, 23:22–23:26 UTC):** instance `cc-isaac-gate` (console, Isaac Launchable), g6e.4xlarge,
+  1× L40S 46 GB, driver 595.71.05, 16 vCPU, $3.65/hr; **Isaac Sim 6.0.1-rc.7** in the launchable's `vscode` container
+  (`/isaac-sim/python.sh`; container had no `python3`, so `python3 python3-venv` were apt-installed there — environment
+  only). Kit uploaded alone (§11; no real frames/labels). `run_log.txt`: "kit files match MANIFEST.sha256", twin from
+  Drive (station `293d74ba…` = Mac copy), 6 × `exit=0`, 33–39 s per render (one Isaac start each), script 228 s ≈ $0.23.
+  Validity X1–X5 all clear → valid run. Hard checks G0 (0.57/0.85 px), G1 (IoU 0.735), A1 (30/30), A2 (307 vs 310 px)
+  pass. **Outcome (§5): PASS WITH WORK**, decided by the row "valid, no FAIL condition, and ≥ 1 of B1–B6 in WORK".
+  V1–V4 and B6 checked by Claude, blind to ΔE; confirmed by Noor: V1–V4 pass, B6 visible. (Blind look = baseline/t00
+  full frames + crops of all six; the t10/t20/t30/liquid full frames were viewed for V4 after ΔE was read. Outside the
+  intended G02/G03 changes only ≤3-px path-tracing specks differ between renders.) Bands: B1 cap ΔE 19.1 WORK ·
+  B2 plate ΔE 21.7 WORK · B3 hole interior ΔE 14.3 OK · B4 wall ΔE 14.4 OK · B5 frame luminance
+  |57.3−123.3|/123.3 = 0.54 WORK (renders about half as bright as real) · B6 OK. Per §5: stop; WORK items are
+  twin-only fixes (materials, lights), verified by re-running this same rule before any dataset. Crooked-cap scope (§6):
+  SUPPORTED (t20 centroid shift 2.68× real seated spread, t30 4.21×). Results on the Mac (gitignored):
+  `results/isaac_gate/run1/` (report, evidence), tarballs in `~/Downloads/isaac_gate_1022/`.
+- **Generator on the GPU (Oct 22):** selftest passed; smoke 300×30 and tilt sweep 130×30 labels OK + physical checks
+  OK on the instance. 6 check renders `exit=0`, 34 s each, 30 crops each (`results/isaac_gate/check1/`). All-seated
+  sweep 00000 vs gate baseline: mean abs diff 1.0 grey level. Eye checks: boxes on vials; hidden caps/vials absent;
+  smoke lighting differs (frame mean 49/45/59), cap colour only slightly; 20°/30° caps visibly differ from seated.
+  Handoff step-7 command bug: `render_keep.py` resolves a relative `--stage` against `--twin`, so pass an absolute
+  path (`$PWD/$s/scene.usda`); first attempt rendered nothing (logs kept in `renders_check_try1`).
+  Instance up ~22:53 UTC, stop issued 23:33, STOPPED 23:40 ≈ 40–47 min ≈ $2.45–2.90 (console has the billed
+  figure); stopped, not deleted. Sizing: 34 s/render with one Isaac start per scene → 430 scenes ≈ 4.1 h ≈ $15.
 - **YAAD access (Noor, Oct 22):** joined the Code Crusaders team on the YAAD site; CSI VPN (FortiClient) connects;
   SSH works: `ssh yt-codecrusaders6286@172.30.102.94` (VPN first); lands as root, `/workspace` empty.
 - **CSI request sent (email to Shamar, Oct 22)** — see External dependencies. **Staging list doc** for the session:
@@ -46,9 +70,10 @@ YAAD team code).
   replied: "I'm working on the m8 inspection pipeline right now" — what "m8" means is **not yet clarified**.
 
 ### 2. Implemented but NOT verified
-- **No Isaac Sim render exists.** Unknown whether RTX honours the generator's light (intensity, colour temperature,
-  rotation) and material (UsdPreviewSurface) overrides, or whether the variation looks realistic.
-- **Frozen gate-v2.0.2 has never run on a GPU → no gate result** (not PASS, not anything). Status: not run.
+- **Generator overrides only partly checked:** 3 smoke renders show different lighting; whether every light and
+  material override is honoured, and whether the variation looks realistic, is not measured yet.
+- **Gate WORK items open (B1 cap colour, B2 plate colour, B5 frame brightness):** no twin fix made or verified yet;
+  training-set rendering waits until the same frozen rule passes again after twin-only fixes (§5). Awaiting review.
 - **No synthetic-trained ResNet-18 exists.** Synthetic-to-real transfer is untested. No transfer claim anywhere.
 - **No live runtime exists** (camera frames → 30 per-hole results on screen + trial log). Most parts exist offline
   (`positions.py`, `fill_state.py`, `inspect_frame.py` event detection, `eval_metrics.py`); the live wrapper does not.
@@ -87,6 +112,8 @@ YAAD team code).
   in case the live camera is 1920×1080.
 
 ## NEXT ACTION (Thu Oct 22, rest of day) — first GPU run
+**Done Oct 22 evening (steps 1–9; results under Completed): gate PASS WITH WORK; stopped for review (ChatGPT/Noor).
+Do not rerun the gate as-is; the next gate run follows the review's twin-only WORK fixes.**
 **Provision a Brev GPU, run the frozen gate unchanged, get the first verified renders.** Then continue with
 `claude/next-session-plan.md`. Stop and ask Noor before creating anything that costs money.
 1. `brev refresh && brev list` → expect org `UWM/MSOE-Team-25`, no instances (or only ones a teammate made — don't touch).
@@ -199,7 +226,8 @@ validation. `labels/dev_labels.csv` = DRAFT labels.
 
 ## Compute and resources
 - **Brev (gate + renders):** team org `UWM/MSOE-Team-25`, $500 shared, Noor logged in via CLI v0.6.337, Vang
-  authorized an instance, **none created yet**. Stop instances whenever idle. No personal spending (D010).
+  authorized an instance. `cc-isaac-gate` (g6e.4xlarge L40S, $3.65/hr) exists, **stopped** after the Oct 22 gate run;
+  create instances from the console (CLI launch fails). Stop instances whenever idle. No personal spending (D010).
 - Dan Schneider's Oct 16 Brev org for Noor (as Ignite captain, $500): relation to `UWM/MSOE-Team-25` not confirmed —
   don't spend from two orgs without Noor saying so.
 - **YAAD GPU Lab** (CSI, free): 8 DGX Sparks (aarch64); team workspace exists, Noor joined Oct 22 (login above; VPN

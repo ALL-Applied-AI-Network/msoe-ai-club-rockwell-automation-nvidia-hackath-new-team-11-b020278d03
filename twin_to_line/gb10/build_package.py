@@ -62,7 +62,7 @@ def python_runtime(dst):
 def wheels(dst):
     for tag, pins in PINS.items():
         d = os.path.join(dst, tag); os.makedirs(d)
-        cmd = [sys.executable, "-m", "pip", "download", "--quiet", "--only-binary=:all:", "--implementation", "cp",
+        cmd = [sys.executable, "-m", "pip", "download", "--quiet", "--disable-pip-version-check", "--only-binary=:all:", "--implementation", "cp",
                "--python-version", tag[2] + "." + tag[3:], "--dest", d, *sum((["--platform", p] for p in PLATFORMS), []), *pins]
         subprocess.run(cmd, check=True)
         open(os.path.join(d, "requirements.txt"), "w").write("\n".join(pins) + "\n")
@@ -90,11 +90,11 @@ def preflight_data(dst):
 
 
 def import_trace(pkg):
-    """Third-party modules the runtime imports during a preflight run (must be covered by the wheels)."""
-    code = ("import runpy, sys, sysconfig\nsys.argv = ['live_inspect.py', '--preflight', sys.argv[1], '--out', sys.argv[2]]\n"
+    """Third-party modules imported during a preflight run, not counting interpreter start-up (must be covered by the wheels)."""
+    code = ("import runpy, sys, sysconfig\nbefore = set(sys.modules)\nsys.argv = ['live_inspect.py', '--preflight', sys.argv[1], '--out', sys.argv[2]]\n"
             "try:\n    runpy.run_path('live_inspect.py', run_name='__main__')\nexcept SystemExit as e:\n    ok = e.code == 0\n"
             "sp = sysconfig.get_paths()['purelib']\n"
-            "mods = sorted({m.split('.')[0] for m, v in list(sys.modules.items()) if (getattr(v, '__file__', None) or '').startswith(sp)})\n"
+            "mods = sorted({m.split('.')[0] for m, v in list(sys.modules.items()) if m not in before and (getattr(v, '__file__', None) or '').startswith(sp)})\n"
             "print('PREFLIGHT', 'OK' if ok else 'FAILED'); print(' '.join(mods))")
     out = subprocess.run([sys.executable, "-c", code, os.path.join(pkg, "preflight"), os.path.join(pkg, "..", "_trace")],
                          cwd=HERE, capture_output=True, text=True, check=True).stdout.strip().splitlines()

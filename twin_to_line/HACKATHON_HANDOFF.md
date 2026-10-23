@@ -54,6 +54,40 @@ YAAD team code).
   twin-only fixes (materials, lights), verified by re-running this same rule before any dataset. Crooked-cap scope (§6):
   SUPPORTED (t20 centroid shift 2.68× real seated spread, t30 4.21×). Results on the Mac (gitignored):
   `results/isaac_gate/run1/` (report, evidence), tarballs in `~/Downloads/isaac_gate_1022/`.
+- **Gate run 2: post-WORK verification, colours calibrated on DEV runs 1–3 (Oct 23, 18:09–18:13 UTC).**
+  - **Instance change:** `cc-isaac-gate` could not restart ("Capacity is unavailable in this region"; it now shows
+    FAILURE, left untouched). Run 2 used **`cc-isaac-gate-2`**: console, Isaac Launchable, **Mumbai (ap-south-1)**,
+    g6e.4xlarge, 1× L40S, driver 595.71.05, **$4.38/hr (was $3.65/hr)**, same Isaac Sim 6.0.1-rc.7 `vscode`
+    container (`python3 python3-venv` apt-installed again, environment only).
+  - **Uploaded:** kit + overlay only; the twin came from Drive on the instance (station `293d74ba…`, camera
+    `0376842d…` = Mac copy).
+  - **Twin-only fix `work1`** (`twin_fix.py`, commit `9849d00`): overlay twin `twin_fix1` next to the untouched twin.
+    Both RectLights +0.75 EV (key 2864.79 → 4817.98, fill 1002.68 → 1686.29); cap `diffuseColor` blue 0.10 → 0.00.
+    - Values were fixed before the render, from run 1 + DEV runs 1–3 only. The pooled DEV targets equal the gate's
+      reference values, so in effect this is calibration on the gate references.
+    - `--check`: only those 3 values differ (299 prims, 4,031 properties); variant labels = run 1's.
+  - **Diagnosis behind it:**
+    - Tone map is ACES (pre-gate probe, no render: `/rtx/post/tonemap/op = 6`, auto-exposure
+      `/rtx/post/histogram/enabled = False`); no clipping; sRGB fine.
+    - The left third of the frame is station-frame satin steel about 0.2 m from the lens rendering black; 8 % of
+      the frame has no station geometry. So B5 cannot reach OK with lights or materials.
+  - **Execution:** `run_log.txt`: "kit files match MANIFEST.sha256", 6 × `exit=0`, 34–36 s per render, script 214 s
+    ≈ $0.26. X1–X5 clear → valid run.
+  - **V1–V4 pass, B6 visible:** checked by Claude on both panels and all six full frames **before** reading ΔE; Noor
+    to confirm.
+  - **Hard checks pass:** G0 0.76/0.87 px · G1 0.725 · A1 30/30 · A2 318/310 = 1.03.
+  - **Bands, run 1 → run 2 (prediction):** B1 19.1 → **8.7 OK** (8.7) · B2 21.7 → **13.3 OK** (13.3) · B3 14.3 → 9.8
+    OK (9.8) · B4 14.4 → 7.2 OK (8.2) · B5 0.54 → **0.41 WORK** (0.41) · B6 OK.
+  - **Outcome (§5): PASS WITH WORK**, the same row as run 1; B5 is the only WORK item.
+  - **Regressions vs run 1** (all inside their limits):
+    - G0 median 0.57 → 0.76 px; G1 0.735 → 0.725; A2 0.99 → 1.03.
+    - Crooked-cap ratios: centroid t20 2.68 → 2.46, t30 4.21 → 3.92; elongation t20 1.12 → 0.08, t30 1.78 → 0.71.
+      Scope still **SUPPORTED**.
+    - Synthetic frame std 65.7 → 80.5 (real 65.2); plate spread 8.5 → 7.4 (real 17.9).
+  - **Cost:** instance up ~17:48 UTC, stop issued 18:13, STOPPED by 18:21 ≈ 25–33 min ≈ $1.8–2.4 (the console has
+    the billed figure); stopped, not deleted.
+  - **Files** (gitignored): `results/isaac_gate/run2/` (report, evidence, probe log); tarballs in
+    `~/Downloads/isaac_gate_run2/`. Run 1 files unchanged (88 sha256 re-checked).
 - **Generator on the GPU (Oct 22):** selftest passed; smoke 300×30 and tilt sweep 130×30 labels OK + physical checks
   OK on the instance. 6 check renders `exit=0`, 34 s each, 30 crops each (`results/isaac_gate/check1/`). All-seated
   sweep 00000 vs gate baseline: mean abs diff 1.0 grey level. Eye checks: boxes on vials; hidden caps/vials absent;
@@ -72,8 +106,13 @@ YAAD team code).
 ### 2. Implemented but NOT verified
 - **Generator overrides only partly checked:** 3 smoke renders show different lighting; whether every light and
   material override is honoured, and whether the variation looks realistic, is not measured yet.
-- **Gate WORK items open (B1 cap colour, B2 plate colour, B5 frame brightness):** no twin fix made or verified yet;
-  training-set rendering waits until the same frozen rule passes again after twin-only fixes (§5). Awaiting review.
+- **Gate WORK after run 2: only B5 (frame luminance 0.41) is still open.** B1 and B2 are fixed by `work1` and
+  verified.
+  - B5 needs a scene decision, not lights or materials: either the station-frame part near the lens, or composing the
+    MagneMover + facility.
+  - Awaiting review (ChatGPT/Noor) before any dataset.
+  - Training renders would use the `work1` overlay (the generator inherits its base light and cap values; the
+    generator's randomization ranges are not yet re-checked against it).
 - **No synthetic-trained ResNet-18 exists.** Synthetic-to-real transfer is untested. No transfer claim anywhere.
 - **No live runtime exists** (camera frames → 30 per-hole results on screen + trial log). Most parts exist offline
   (`positions.py`, `fill_state.py`, `inspect_frame.py` event detection, `eval_metrics.py`); the live wrapper does not.
@@ -226,8 +265,11 @@ validation. `labels/dev_labels.csv` = DRAFT labels.
 
 ## Compute and resources
 - **Brev (gate + renders):** team org `UWM/MSOE-Team-25`, $500 shared, Noor logged in via CLI v0.6.337, Vang
-  authorized an instance. `cc-isaac-gate` (g6e.4xlarge L40S, $3.65/hr) exists, **stopped** after the Oct 22 gate run;
-  create instances from the console (CLI launch fails). Stop instances whenever idle. No personal spending (D010).
+  authorized an instance.
+  - `cc-isaac-gate` (g6e.4xlarge L40S, $3.65/hr) shows FAILURE: it could not restart Oct 23 (no capacity in its
+    region); left untouched.
+  - `cc-isaac-gate-2` (Mumbai ap-south-1, g6e.4xlarge L40S, **$4.38/hr**) is **stopped** after gate run 2.
+  - Create instances from the console (CLI launch fails). Stop instances whenever idle. No personal spending (D010).
 - Dan Schneider's Oct 16 Brev org for Noor (as Ignite captain, $500): relation to `UWM/MSOE-Team-25` not confirmed —
   don't spend from two orgs without Noor saying so.
 - **YAAD GPU Lab** (CSI, free): 8 DGX Sparks (aarch64); team workspace exists, Noor joined Oct 22 (login above; VPN

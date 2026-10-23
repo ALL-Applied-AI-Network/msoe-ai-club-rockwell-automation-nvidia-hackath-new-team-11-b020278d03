@@ -114,7 +114,8 @@ def main():
     if os.path.exists(pkg):
         raise SystemExit(f"{pkg} exists; remove it to rebuild")
     os.makedirs(os.path.join(pkg, "runtime"))
-    subprocess.run(["git", "-C", HERE, "archive", "--format=tar", "-o", os.path.join(pkg, "code.tar"), commit], check=True)
+    top = git("rev-parse", "--show-toplevel")                             # archive the whole repo, not this subfolder
+    subprocess.run(["git", "-C", top, "archive", "--format=tar", "-o", os.path.join(pkg, "code.tar"), commit], check=True)
     with tarfile.open(os.path.join(pkg, "code.tar")) as t:
         names = set(t.getnames())
         missing = [f for f in L.RUNTIME_FILES if f"twin_to_line/{f}" not in names]

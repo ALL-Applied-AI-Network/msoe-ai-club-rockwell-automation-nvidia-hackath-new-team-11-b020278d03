@@ -114,9 +114,9 @@ class Provenance(unittest.TestCase):
 
     def test_git_archive_fills_the_commit(self):
         head = subprocess.run(["git", "-C", P.HERE, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
-        out = subprocess.run(["git", "-C", P.HERE, "archive", "HEAD", "twin_to_line/ARCHIVE_COMMIT"], capture_output=True)
-        if out.returncode != 0:
-            self.skipTest("ARCHIVE_COMMIT not committed yet")
+        top = subprocess.run(["git", "-C", P.HERE, "rev-parse", "--show-toplevel"], capture_output=True, text=True).stdout.strip()
+        out = subprocess.run(["git", "-C", top, "archive", "HEAD", "twin_to_line/ARCHIVE_COMMIT"], capture_output=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
         import io, tarfile
         with tarfile.open(fileobj=io.BytesIO(out.stdout)) as t:
             self.assertEqual(t.extractfile("twin_to_line/ARCHIVE_COMMIT").read().decode().strip(), head)

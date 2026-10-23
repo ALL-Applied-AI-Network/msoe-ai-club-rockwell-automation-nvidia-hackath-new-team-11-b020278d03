@@ -28,7 +28,7 @@ never writes into the image folder (R10).
    `shasum -a 256 -c FREEZE.sha256` → every line `OK` (R11; that file is written at the freeze).
 2. **Tests.**
    `IGNITE_TWIN=~/Downloads/csi_digital_twin/csi_digital_twin_v1 ../.venv/bin/python -m pytest tests -q`
-   → `125 passed` (or the count in the freeze record).
+   → `156 passed` (or the count in the freeze record).
 3. **Replay folder** (once; 569 MB, stays in `results/`, never committed):
    `../.venv/bin/python live_inspect.py --export-replay 1 --out results/live/replay_run1`
    → `run 1: 1123 frames (video) -> results/live/replay_run1`
@@ -139,3 +139,97 @@ never writes into the image folder (R10).
 - Measured on this Mac (DEV run 1 replay): rule median 27 ms per scored image, ResNet (MPS) 74 ms; 1.3 ms per other
   image (R7 target ≤ 1 s); a 1920×1080 frame adds ~3.4 ms for the warp. ResNet start-up (torch, model load, warm-up)
   takes about 2.5 s before its first line.
+
+## 7. Monday Oct 26 on CSI's GB10: start to stop
+Our software runs on CSI's GB10 (aarch64 Linux) from the frozen package, rule inspector only (no torch, no Isaac). The
+package brings its own Python 3.11 and wheels and installs offline; it writes only inside its own folder.
+Rehearsed Oct 23 on the YAAD Spark (NVIDIA DGX Spark, GB10, Ubuntu 24.04.3, glibc 2.39, no system Python):
+unpack → `PREFLIGHT OK` in **5 s**; package 243 MB (596 MB unpacked); DEV run 1 replayed at 640 and as 1080 copies
+gave the same states and scores as the Mac, hole for hole.
+
+**Bring:** USB stick with `ttl_gb10_<sha>.tar` + `ttl_gb10_<sha>.tar.sha256` (built from the freeze commit), room on it
+for the results; printed staging list, label sheet and this section; paper log.
+
+1. **Before 12:30 (≈5 min): install and check.** Open a terminal on the GB10.
+   ```bash
+   lsblk -o NAME,SIZE,MOUNTPOINT                 # find the stick, e.g. /media/<user>/<label>
+   USB=/media/<user>/<label>
+   mkdir -p ~/ttl && cp "$USB"/ttl_gb10_<sha>.tar* ~/ttl/ && cd ~/ttl
+   sha256sum -c ttl_gb10_<sha>.tar.sha256        # -> ttl_gb10_<sha>.tar: OK
+   tar -xf ttl_gb10_<sha>.tar && cd ttl_gb10_<sha> && bash bootstrap.sh
+   ```
+   Expected (Spark, 5 s in total):
+   ```
+   == 1/5 checksums (0 s)
+   SHA256SUMS OK (40 files)
+   == 2/5 code (0 s)
+   commit <the freeze commit>
+   == 3/5 python (0 s)
+   python /home/<user>/ttl/ttl_gb10_<sha>/pyhome/python/bin/python3 (Python 3.11.17), wheels/cp311
+   == 4/5 venv + install (1 s)
+   numpy                  2.4.6
+   opencv-python-headless 5.0.0.93
+   == 5/5 preflight (4 s)
+   os / kernel / arch aarch64 / glibc / python 3.11.17 / numpy 2.4.6 / opencv 5.0.0 / torch not installed (not needed)
+   code     <sha> (archive)
+   sha256   ...  (one line per runtime file; check them against the freeze record)
+   still_1080  1 frames, path 1080->640, {'WAITING': 30}; vs Mac: 0 holes differ, max |score diff| 0 -> OK
+   run1_640   10 frames, path 640, {'UNSURE': 39, 'PASS': 79, 'MISSED': 10, 'WAITING': 172}; vs Mac: 0 holes differ, max |score diff| 0 -> OK
+   run1_1080  10 frames, path 1080->640, {'UNSURE': 36, 'PASS': 82, 'MISSED': 10, 'WAITING': 172}; vs Mac: 0 holes differ, max |score diff| 0 -> OK
+   PREFLIGHT OK -> .../preflight_out/preflight.json
+   BOOTSTRAP OK in 5 s
+   ```
+   Hashes to check by eye: `rule_thresholds.json` 322c29ec…, `frame_warp_1080.json` 9837b298…, `position_map_G.json`
+   7ffaf48c…, `registration_dev.json` 6dd0de1b….
+   If it stops with `BOOTSTRAP FAILED: ...`:
+   - `SHA256SUMS mismatch`: copy the tar again from the stick.
+   - `bundled Python not usable here; trying the system Python`: this line alone is fine if a `python ...` line and `OK`
+     follow. `no usable Python`: stop and tell Noor (no install on CSI's machine without CSI's OK).
+   - `offline install failed`: only if CSI allows internet on the GB10: `bash bootstrap.sh --online`. Else stop.
+   - `preflight`: **don't run.** Note which set says `FAIL`; results on this machine would differ from the Mac.
+   Then, for every later step:
+   ```bash
+   cd ~/ttl/ttl_gb10_<sha>/code/twin_to_line
+   PY=../../venv/bin/python
+   ```
+2. **The camera folder.** `IN=/path/where/the/images/arrive` (from CSI). Check one image:
+   `ls -lt "$IN" | head -3` and `$PY -c "import cv2,sys; print(cv2.imread(sys.argv[1]).shape)" "$IN/<newest file>"`
+   → `(1080, 1920, 3)` (or `(480, 640, 3)`). Anything else (e.g. `(240, 320, 3)`): ask CSI for the 1920×1080 images.
+3. **12:30 staging.** CSI saves one image per staged setup into a folder `STAGED` that is never `IN`. Nothing runs on
+   `STAGED` yet. Noor and Tony fill the label sheet per setup.
+4. **Staged stills, only after the labels are locked** (§5): the label CSV is complete and its sha256 is on the paper
+   log (`sha256sum <labels csv>`). Then, once:
+   ```bash
+   OUT=results/live/staged_rule_$(date +%Y%m%d_%H%M%S)
+   $PY live_inspect.py --source replay:"$STAGED" --gate each --out "$OUT" --note "sealed staged test, rule arm, Oct 26"
+   ```
+   Expected: `inspector rule_yellow_seat  rule_thresholds.json 322c29ec2ea9`, one line per image,
+   `event  N  <file> K=<last filled hole> delay   0.0s  <state counts>`, then `22 frames, 22 events, {'scored': 22} -> <OUT>`.
+   An image with the arm over the fixture is counted as `arm` and gets no event line. Every image is scored on its
+   own; never add `--track`.
+5. **Live run (events gate).**
+   ```bash
+   OUT=results/live/csi_live_$(date +%Y%m%d_%H%M%S)
+   $PY live_inspect.py --source folder:"$IN" --out "$OUT" --note "CSI live run, Oct 26"
+   ```
+   Expected: the inspector line, then nothing until the first event. In a second terminal
+   `tail -f "$OUT/trial_log.csv" | cut -d, -f6,8,77` shows one `<file>,<status>,1080->640` line per new image within
+   ~1 s (Spark: 0.3–0.4 s). After 4 s of a still fixture with the arm away: `event N <frame> K=.. delay 4.0s ...`.
+   Operator view: `$OUT/overlay_latest.png`, rewritten after each event (open it with the image viewer, e.g.
+   `xdg-open "$OUT/overlay_latest.png"`, and reopen after each event line).
+   **If frames arrive only one at a time** (saved on a trigger, or seconds apart): look at
+   `cut -d, -f6,7,8 "$OUT/trial_log.csv"` (file, frame time, status).
+   - Images ≥ 4 s apart while the fixture stays the same: the event comes with the second image (its delay = the gap).
+   - Every image shows a new fixture state, or `frame_t` doesn't increase: the status stays `settling` and no event line
+     ever comes. Ctrl-C and start again into a **new** `OUT` with `--gate each`: every arm-clear image is then scored on
+     its own (Spark: scored 0.4 s after the file appeared). Log the restart as an intervention.
+6. **Stop.** Ctrl-C once → `N frames, M events, {...} -> <OUT>`; `session.json` has `"stop_reason": "ctrl-c"`.
+7. **Copy the results to the stick, with sha256.**
+   ```bash
+   cd ~/ttl && tar -cf ttl_results_20261026.tar -C ttl_gb10_<sha> preflight_out code/twin_to_line/results/live
+   sha256sum ttl_results_20261026.tar > ttl_results_20261026.tar.sha256
+   cp ttl_results_20261026.tar ttl_results_20261026.tar.sha256 "$USB"/ && sync
+   (cd "$USB" && sha256sum -c ttl_results_20261026.tar.sha256)     # -> ttl_results_20261026.tar: OK
+   ```
+   Keep `~/ttl` on the GB10 until the stick has been checked on the Mac (`shasum -a 256 -c`); then remove it only if
+   CSI asks. Delete nothing else on CSI's machine.

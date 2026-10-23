@@ -19,8 +19,12 @@ Fixed before any training render existed (Oct 23):
               validation defect crops (missing_cap + crooked_cap). Visual state at runtime: if s >= t, the more likely
               defect class; otherwise the more likely of pass / no_vial. Reported with it: validation false-alarm rate on
               pass and on no_vial, per-class recall, and the threshold that catches every validation defect (MAIC metric).
-Outputs (OUT, gitignored): model.pt, thresholds.json, train_log.csv, val_predictions.csv, run.json (data and code
-hashes, versions, seed), and the sha256 of model.pt in run.json.
+  D038 (Oct 23, after v1 trained, before any DEV evaluation): the deployed threshold is the midpoint of the empty gap
+              between the highest non-defect and the lowest defect score on synthetic validation, because the 99.5 %
+              rule degenerates when validation separates perfectly. thresholds_d038.json carries it and the
+              pre-registered t_defect, reported side by side. `--d038 OUT` writes it for a finished run.
+Outputs (OUT, gitignored): model.pt, thresholds.json, thresholds_d038.json, train_log.csv, val_predictions.csv,
+run.json (data and code hashes, versions, seed), and the sha256 of model.pt in run.json.
 """
 import argparse, csv, hashlib, json, os, platform, subprocess, sys, time
 import cv2, numpy as np
@@ -126,13 +130,19 @@ def evaluate(model, ds, bs, device, torch):
     return np.concatenate(probs), np.array([it[2] for it in ds.items])
 
 
+def decide(probs, t):
+    """Class index per row: s >= t -> the more likely defect class, else the more likely of pass / no_vial."""
+    s = probs[:, DEFECTS].sum(1)
+    return np.where(s >= t, np.where(probs[:, 1] >= probs[:, 2], 1, 2), np.where(probs[:, 0] >= probs[:, 3], 0, 3))
+
+
 def choose_threshold(probs, y):
     s = probs[:, DEFECTS].sum(1); d = np.isin(y, DEFECTS)
     sd = np.sort(s[d])
     t = float(sd[int(np.floor((1 - RECALL_TARGET) * len(sd)))])    # >= RECALL_TARGET of defects have s >= t
     t_all = float(sd[0])
     far = lambda thr, c: float(np.mean(s[y == c] >= thr)) if np.any(y == c) else None
-    pred = np.where(s >= t, np.where(probs[:, 1] >= probs[:, 2], 1, 2), np.where(probs[:, 0] >= probs[:, 3], 0, 3))
+    pred = decide(probs, t)
     return {"rule": f"s = P(missing_cap) + P(crooked_cap); t = highest threshold flagging >= {RECALL_TARGET:.1%} of "
                     "validation defects; s >= t -> the more likely defect class, else the more likely of pass / no_vial",
             "t_defect": t, "val_defect_recall": float(np.mean(s[d] >= t)),
@@ -145,13 +155,52 @@ def choose_threshold(probs, y):
             "n_val": int(len(y)), "n_val_defects": int(d.sum())}
 
 
+def gap_threshold(probs, y, t_preregistered, source):
+    """D038 (Oct 23, before any DEV evaluation): t = midpoint of the empty gap between the highest non-defect score and
+    the lowest defect score on synthetic validation. The 99.5 % rule degenerates when validation separates perfectly
+    (it puts t at the top of the defect scores). D038 covers only that case: if the scores overlap, t is None and a
+    new decision is needed. The pre-registered threshold is carried along so every result can report both."""
+    s = probs[:, DEFECTS].sum(1); d = np.isin(y, DEFECTS)
+    hi, lo = float(s[~d].max()), float(s[d].min())
+    t = (hi + lo) / 2 if lo > hi else None
+    out = {"decision": "D038", "rule": "t = midpoint of the empty gap between the highest non-defect score and the lowest "
+                                       "defect score on synthetic validation; s = P(missing_cap) + P(crooked_cap); s >= t -> "
+                                       "the more likely defect class, else the more likely of pass / no_vial",
+           "t_defect": t, "gap": {"max_non_defect_score": hi, "min_defect_score": lo, "width": lo - hi},
+           "t_defect_preregistered": t_preregistered, "source": source, "n_val": int(len(y)), "n_val_defects": int(d.sum())}
+    if t is not None:
+        pred = decide(probs, t); mean = lambda v: float(np.mean(v)) if len(v) else None
+        out.update({"val_defect_recall": mean(s[d] >= t),
+                    "val_false_alarm_rate": {"pass": mean(s[y == 0] >= t), "no_vial": mean(s[y == 3] >= t)},
+                    "val_per_class_recall_after_rule": {c: mean(pred[y == k] == k) for k, c in enumerate(CLASSES)}})
+    return out
+
+
+def write_d038(out):
+    """thresholds_d038.json for a finished run, from its val_predictions.csv (probabilities rounded to 6 decimals)."""
+    rows = list(csv.DictReader(open(os.path.join(out, "val_predictions.csv"))))
+    probs = np.array([[float(r[f"p_{c}"]) for c in CLASSES] for r in rows]); y = np.array([CLASSES.index(r["label"]) for r in rows])
+    pre = json.load(open(os.path.join(out, "thresholds.json")))["t_defect"]
+    th = gap_threshold(probs, y, pre, {"val_predictions_csv_sha256": sha256(os.path.join(out, "val_predictions.csv")),
+                                       "thresholds_json_sha256": sha256(os.path.join(out, "thresholds.json")),
+                                       "note": "probabilities as rounded in val_predictions.csv"})
+    json.dump(th, open(os.path.join(out, "thresholds_d038.json"), "w"), indent=1)
+    return th
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--data", nargs="+", required=True); ap.add_argument("--out", required=True)
+    ap.add_argument("--data", nargs="+"); ap.add_argument("--out")
     ap.add_argument("--epochs", type=int, default=15); ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--device", default="mps"); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--recipe", default=os.path.join(P.HERE, "configs", "recipe_dev.json"))
+    ap.add_argument("--d038", metavar="OUT", help="write thresholds_d038.json for a finished run and exit")
     a = ap.parse_args()
+    if a.d038:
+        th = write_d038(a.d038)
+        print(json.dumps({k: v for k, v in th.items() if k not in ("rule", "source")}, indent=1)); return
+    if not (a.data and a.out):
+        ap.error("--data and --out are required to train")
     import torch, torchvision
     torch.manual_seed(a.seed); os.makedirs(a.out, exist_ok=True)
     if os.path.exists(os.path.join(a.out, "model.pt")):
@@ -187,6 +236,8 @@ def main():
     torch.save(model.state_dict(), os.path.join(a.out, "model.pt"))
     th = choose_threshold(pv, yv)
     json.dump(th, open(os.path.join(a.out, "thresholds.json"), "w"), indent=1)
+    json.dump(gap_threshold(pv, yv, th["t_defect"], {"note": "validation probabilities in memory"}),
+              open(os.path.join(a.out, "thresholds_d038.json"), "w"), indent=1)
     with open(os.path.join(a.out, "val_predictions.csv"), "w", newline="") as f:
         wr = csv.writer(f); wr.writerow(["scene_id", "position", "label", "variant", "cap_group"] + [f"p_{c}" for c in CLASSES])
         for r, p in zip(val.rows, pv):
@@ -202,6 +253,7 @@ def main():
            "recipe_sha256": sha256(a.recipe), "train_resnet_sha256": sha256(os.path.abspath(__file__)), "git_commit": commit,
            "torch": torch.__version__, "torchvision": torchvision.__version__, "python": platform.python_version(),
            "model_pt_sha256": sha256(os.path.join(a.out, "model.pt")), "thresholds_sha256": sha256(os.path.join(a.out, "thresholds.json")),
+           "thresholds_d038_sha256": sha256(os.path.join(a.out, "thresholds_d038.json")),
            "wall_seconds": round(time.time() - t0), "real_images_used": 0}
     json.dump(run, open(os.path.join(a.out, "run.json"), "w"), indent=1)
     print(json.dumps({k: th[k] for k in ("t_defect", "val_defect_recall", "val_false_alarm_rate", "t_catch_every_val_defect",

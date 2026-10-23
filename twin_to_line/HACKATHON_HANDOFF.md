@@ -114,11 +114,33 @@ YAAD team code).
   - **Threshold (pre-registered rule):** t_defect = 0.99968 → validation defect recall 0.995 (6 of 1,200 missed:
     5 crooked → pass, mostly 20° tilts; 1 missing → no_vial); false alarms 0 on pass and on no_vial.
     t_catch_every_val_defect = 0.99664, also 0 false alarms.
-  - **Open concern (not acted on):** on perfectly separable validation the 99.5 % rule puts t at the top of the
-    defect scores. It drops 6 defects the model scores ≥ 0.9966 and leaves no margin for the real-camera shift. Any
-    rule change must be decided and recorded before the first DEV evaluation.
+  - **D038 (Noor, Oct 23, before any DEV evaluation):** deployed t = midpoint of the empty validation gap
+    (0.007852 … 0.996635) = **0.50224** (`thresholds_d038.json` sha `338c955e…`); the pre-registered 0.99968 is
+    reported next to it everywhere. The 99.5 % rule had dropped 6 validation defects scored ≥ 0.9966.
   - Files (gitignored): `results/train/resnet18_v1/` (`model.pt` sha `8380851f…`, `thresholds.json` sha
     `e9f4b5c5…`, `run.json`, `val_predictions.csv`).
+- **G3 on DEV runs 1–3 (Oct 23, run once, `g3_check.py` @ `250cf5a`): NO-GO.** Pipeline = live defaults: one frame
+  per placement event (20 events), DEV offset map, `inspect_frame.inspect`, LIVE_FILL, frontier WAITING, no tracker;
+  583 usable draft labels (32 defect, 551 non-defect observations). Development signal only; no retuning.
+  - **ResNet-18 v1 at D038 t = 0.50224:** recall **1.000 (32/32)**, false positives **87.7 % (483/551)** → fails
+    ≤ 5 %. Per class (detection / exact class): crooked 19/19 / 12/19, missing 12/12 / 12/12, missed placement
+    1/1 / 0/1. False alarms: 89 of 112 real passes → DEFECT (75 read as crooked); 394 of 439 trailing empties → 165
+    DEFECT + 229 MISSED.
+  - **At the pre-registered t = 0.99968:** recall 0.469 (15/32; crooked 2/19, missing 12/12, missed 1/1),
+    false positives 55.9 % (308/551).
+  - eval_metrics' false-alarm rate at full recall (t 0.844) is 38.3 %, so the failure is the model, not the
+    threshold choice.
+  - **Failure modes:**
+    - Real empty holes read as uncapped vials: 166 of 440 → missing_cap, mostly the lighter top-row holes.
+    - Real seated caps read as crooked: median defect score 0.94.
+    - Each false "occupied" hole moves the fill frontier, turning the empties before it into MISSED (e.g. run 2:
+      G28 → 13 MISSED).
+  - **Rule baseline, same pipeline (reference only; thresholds fitted on these labels):** recall 31/32, false
+    positives 14/551 (2.5 %), which reproduces D021.
+  - Per the plan's fallback (NEXT_SESSION_PLAN, G3 no-go): the rule baseline runs live; ResNet-18 is still scored
+    offline as arm A. The step-9 inspector choice is Noor's.
+  - Files (gitignored): `results/g3/resnet18_v1/` (`g3_report.json`, predictions per arm, `probabilities.csv`,
+    `annotated/`).
 - **Generator on the GPU (Oct 22):** selftest passed; smoke 300×30 and tilt sweep 130×30 labels OK + physical checks
   OK on the instance. 6 check renders `exit=0`, 34 s each, 30 crops each (`results/isaac_gate/check1/`). All-seated
   sweep 00000 vs gate baseline: mean abs diff 1.0 grey level. Eye checks: boxes on vials; hidden caps/vials absent;
@@ -141,9 +163,9 @@ YAAD team code).
   - B5 (frame luminance 0.41) is recorded as a **known scene-composition limitation outside the 30 inspected crops**:
     the station-frame steel near the lens, plus no MagneMover or facility in station-only scenes.
   - No more gate fixes. Training renders use the `work1` overlay as their base.
-- **Synthetic-only ResNet-18 v1 exists; synthetic-to-real transfer is untested.** Its synthetic validation is
-  saturated, so it says nothing about real frames; the G3 check on DEV runs 1–3 has not been run. No transfer claim
-  anywhere.
+- **Synthetic-only ResNet-18 v1 does not transfer to DEV frames (G3 NO-GO, 87.7 % false positives at D038).** Its
+  synthetic validation is saturated and says nothing about real frames. No transfer claim anywhere; any model or
+  threshold change after G3 needs Noor's OK and a new decision.
 - **No live runtime exists** (camera frames → 30 per-hole results on screen + trial log). Most parts exist offline
   (`positions.py`, `fill_state.py`, `inspect_frame.py` event detection, `eval_metrics.py`); the live wrapper does not.
 - Known generator limits (D035): tilted caps use the gate's approximate rim pivot (twin cap mesh has no interior);

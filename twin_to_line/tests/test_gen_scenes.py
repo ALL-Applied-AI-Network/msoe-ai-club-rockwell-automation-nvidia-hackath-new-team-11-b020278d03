@@ -283,6 +283,110 @@ class OnTwin(unittest.TestCase):
                 self.assertEqual(o["bbox_in_crop"], b[0] >= x0 and b[1] >= y0 and b[2] <= x1 and b[3] <= y1)
 
 
+TWIN_FIX = os.path.expanduser(os.environ.get("IGNITE_TWIN_FIX", "~/Downloads/csi_digital_twin/twin_fix1"))
+HAVE_FIX = os.path.isfile(os.path.join(TWIN_FIX, "FIX.json"))
+_fix = None
+
+
+def fix_twin():
+    global _fix
+    if _fix is None:
+        _fix = G.Twin(TWIN_FIX)
+    return _fix
+
+
+@unittest.skipUnless(HAVE_USD and HAVE_TWIN and HAVE_FIX, "needs the twin and its work1 overlay (IGNITE_TWIN_FIX)")
+class TrainingRecipe(unittest.TestCase):
+    """Training configs run on the work1 overlay twin with the DEV-derived recipe (D037)."""
+
+    def setUp(self):
+        self.t = fix_twin(); self.tmp = tempfile.mkdtemp(prefix="test_recipe_")
+        self.cfg, self.sha = G.load_config(os.path.join(CFG, "train_v1.json"), self.t)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_overlay_twin_is_the_gate_run2_base(self):
+        fix = json.load(open(os.path.join(TWIN_FIX, "FIX.json")))
+        self.assertEqual(self.t.fix["fix"], "work1")
+        self.assertEqual(self.t.base_station_sha256, json.load(open(G.MAP_PATH))["meta"]["station_sha256"])
+        for n in G.LIGHTS:
+            self.assertAlmostEqual(self.t.base_intensity[n], fix["F1a_lights"]["intensity"][f"{G.ROOT}/{n}/{n}"]["fixed"], places=2)
+        self.assertEqual(dict((k, v) for k, _, v in self.t.cap_inputs)["diffuseColor"][2], 0.0)
+
+    def test_configs_and_twins_must_match(self):
+        for name in ("train_v1.json", "tilt_train.json"):
+            G.load_config(os.path.join(CFG, name), self.t)
+            with self.assertRaises(G.ConfigError):
+                G.load_config(os.path.join(CFG, name), twin())                    # original twin: refused
+        with self.assertRaises(G.ConfigError):
+            G.load_config(os.path.join(CFG, "smoke.json"), self.t)              # old config on the overlay: refused
+        with self.assertRaises(G.ConfigError):
+            G.validate_config(dict(self.cfg, recipe={"file": "configs/recipe_dev.json", "sha256": "0" * 64}), self.t)
+
+    def test_generated_scenes_follow_the_recipe(self):
+        G.generate(self.t, self.cfg, self.sha, os.path.join(self.tmp, "g"), 0, 6, log=lambda *a: None)
+        L, M = self.cfg["lighting"], self.cfg["materials"]
+        for i in range(6):
+            sdir = os.path.join(self.tmp, "g", "scenes", f"train_v1_{i:05d}")
+            lab = json.load(open(os.path.join(sdir, "labels.json"))); rb = G.read_back(self.t, os.path.join(sdir, "scene.usda"))
+            ev = lab["lighting"]["key_overhead"]["exposure_ev"]
+            self.assertTrue(L["exposure_ev"][0] <= ev <= L["exposure_ev"][1])
+            for n in G.LIGHTS:
+                v = lab["lighting"][n]
+                self.assertEqual(v["exposure_ev"], ev)
+                self.assertAlmostEqual(rb["lights"][n]["intensity"], self.t.base_intensity[n] * 2 ** ev * v["jitter"], delta=1e-3)
+                self.assertTrue(L["color_temperature_k"][0] <= rb["lights"][n]["color_temperature_k"] <= L["color_temperature_k"][1])
+            crooked = set()
+            for o in lab["positions"]:
+                if o["state"] in ("pass", "crooked_cap"):
+                    g = M["cap_groups"][o["cap_group"]]
+                    self.assertEqual(rb["positions"][o["position"]]["cap_material"], f"{G.ROOT}/_materials/ignite_cap_{o['position']}")
+                    k = ((o["cap_ior"] - 1) / (o["cap_ior"] + 1)) ** 2 / 0.04
+                    self.assertTrue(g["spec_scale"][0] - 1e-4 <= k <= g["spec_scale"][1] + 1e-4, (o["position"], k))
+                    self.assertTrue(M["cap_roughness"][0] <= o["cap_roughness"] <= M["cap_roughness"][1])
+                else:
+                    self.assertNotIn("cap_group", o)
+                if o["state"] == "crooked_cap":
+                    self.assertTrue(20 <= o["cap_tilt_deg"] <= 30 and o["bbox_in_crop"]); crooked.add(o["position"])
+            for p in crooked:
+                self.assertFalse(crooked & set(self.t.grid_neighbors[p]), f"scene {i}: {p} has a crooked neighbour")
+
+    def test_per_cap_material_tampering_is_caught(self):
+        from pxr import Sdf, Usd, UsdShade
+        spec = G.build_spec(self.cfg, self.t, 0, 3)
+        path = G.author_scene(self.t, spec, os.path.join(self.tmp, "tamper"))
+        self.assertEqual(G.spec_mismatches(self.t, spec, G.read_back(self.t, path)), [])
+        p = next(s.position for s in spec.positions if s.cap_rgb is not None)
+        lay = Sdf.Layer.FindOrOpen(path); st = Usd.Stage.Open(lay); st.SetEditTarget(lay)
+        UsdShade.Shader(st.GetPrimAtPath(f"{G.ROOT}/_materials/ignite_cap_{p}/Principled_BSDF")).GetInput("ior").Set(1.5)
+        lay.Save()
+        self.assertTrue(any("cap_ior" in m for m in G.spec_mismatches(self.t, spec, G.read_back(self.t, path))))
+
+    def test_sampled_mix_matches_the_recipe(self):
+        specs = [G.build_spec(self.cfg, self.t, 0, i) for i in range(120)]
+        caps = [s for sp in specs for s in sp.positions if s.cap_group]
+        pale = sum(s.cap_group == "pale" for s in caps) / len(caps)
+        self.assertAlmostEqual(pale, self.cfg["materials"]["cap_groups"]["pale"]["weight"], delta=0.04)
+        empty = sum(s.state == "no_vial" for sp in specs for s in sp.positions) / (30 * len(specs))
+        self.assertLess(empty, 0.3)                                                # rebalanced away from smoke's 58 %
+        K = [sp.placements for sp in specs]
+        self.assertTrue(min(K) <= 3 and max(K) == 30 and sum(k <= 10 for k in K) >= 5, K)   # empty-start fills covered
+        with self.assertRaises(G.ConfigError):
+            G.validate_config(dict(self.cfg, placements_mix=[[1.0, [0, 40]]]), self.t)
+
+    def test_pass_offsets_are_sideways_and_fully_seated(self):
+        spec = next(sp for sp in (G.build_spec(self.cfg, self.t, 0, i) for i in range(40))
+                    if sum(s.variant == "offset" for s in sp.positions) >= 3)
+        rb = G.read_back(self.t, G.author_scene(self.t, spec, os.path.join(self.tmp, "off")))
+        for s in spec.positions:
+            if s.variant == "offset":
+                r = rb["positions"][s.position]
+                self.assertEqual((r["state"], r["variant"]), ("pass", "offset"))
+                self.assertLess(max(abs(r["seat_gap_min_mm"]), abs(r["seat_gap_max_mm"]), r["tilt_deg"]), 1e-9)
+                self.assertAlmostEqual(r["base_offset_mm"], s.offset_mm, places=6)
+
+
 class FrozenGate(unittest.TestCase):
     def test_gate_kit_matches_manifest(self):
         for line in open(os.path.join(HERE, "MANIFEST.sha256")):

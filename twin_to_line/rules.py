@@ -36,6 +36,14 @@ class Inspector:
     def inspect(self, crop) -> Observation:
         raise NotImplementedError
 
+    def inspect_batch(self, crops):
+        """All 30 crops of a frame at once (a learned model runs them as one batch)."""
+        return [self.inspect(c) for c in crops]
+
+    def info(self):
+        """Provenance for logs: {name, files: {relative path: sha256}, status}."""
+        return {"name": self.name, "files": {}, "status": ""}
+
 
 def _disk(shape, c, r):
     m = np.zeros(shape, np.uint8); cv2.circle(m, (int(round(c[0])), int(round(c[1]))), r, 1, -1)
@@ -62,12 +70,17 @@ class RuleInspector(Inspector):
     name = "rule_yellow_seat"
 
     def __init__(self, path=THRESHOLDS):
-        self.t = json.load(open(path))["thresholds"]
+        self.path = path; self.t = json.load(open(path))["thresholds"]
 
     def inspect(self, crop):
         f = features(crop)
         state, why = decide(f, self.t)
         return Observation(state, round(1 - f["cap_frac"], 4), f, why)
+
+    def info(self):
+        import hashlib
+        return {"name": self.name, "files": {os.path.relpath(self.path, P.HERE): hashlib.sha256(open(self.path, "rb").read()).hexdigest()},
+                "status": "fitted on DEV draft labels: plumbing placeholder, not a scored arm"}
 
 
 def fit(rows):

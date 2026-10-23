@@ -2,6 +2,7 @@
 fill-order reasoning -> PASS / DEFECT / MISSED / WAITING / UNSURE -> annotated image + JSON / CSV.
 
     python inspect_frame.py SOURCE... [--mode live_fill|final_inspection] [--frontier waiting|unsure] [--track] [--debug] [--out DIR]
+        [--inspector rule|resnet] [--threshold d038|preregistered]
     python inspect_frame.py --run 1 --events [--track | --k-from-events]
 
 SOURCE = a still name/path or a DEV video frame id (cap_seal_video_1.mp4@t0612.0). Runs 4-5 are refused.
@@ -32,7 +33,7 @@ def inspect(img, src, pm, inspector, fill_count=None, plate=None, mode=LIVE_FILL
     t0 = time.perf_counter()
     arm = E.arm_pixels(img, pm, plate)
     crops = P.extract_crops(img, pm, src)
-    obs = [inspector.inspect(c) for c in crops]
+    obs = inspector.inspect_batch(crops)
     if arm:
         for o in obs:
             o.visual_state, o.reason = "unknown", f"arm over the fixture ({arm} yellow px on the plate)"
@@ -98,8 +99,8 @@ def prediction_rows(run, event, res):
     seq = {"MISSED": "missed", "WAITING": "waiting"}
     return [{"run": run, "event": event, "frame": res["frame"], "position": p["position"], "predicted_state": p["visual_state"],
              "defect_score": p["defect_score"], "pred_sequence": seq.get(p["final_state"], ""), "final_state": p["final_state"],
-             "K": res["K"], "K_source": res["K_source"], "cap_frac": p["cap_frac"],
-             "cap_offset": "" if p["cap_offset"] is None else p["cap_offset"], "reason": p["reason"]} for p in res["positions"]]
+             "K": res["K"], "K_source": res["K_source"], "cap_frac": p.get("cap_frac", ""),
+             "cap_offset": "" if p.get("cap_offset") is None else p["cap_offset"], "reason": p["reason"]} for p in res["positions"]]
 
 
 def load(ix, src):
@@ -116,9 +117,16 @@ if __name__ == "__main__":
     ap.add_argument("--mode", choices=MODES, default=LIVE_FILL); ap.add_argument("--frontier", choices=("waiting", "unsure"), default="waiting")
     ap.add_argument("--persist", type=int)
     ap.add_argument("--debug", action="store_true"); ap.add_argument("--out", default=OUT)
+    ap.add_argument("--inspector", choices=("rule", "resnet"), default="rule")
+    ap.add_argument("--threshold", choices=("d038", "preregistered"), default="d038", help="ResNet threshold (D038)")
     a = ap.parse_args()
     tracker = SequenceTracker(a.persist or (1 if a.events else 2), a.mode, a.frontier) if a.track else None
-    ix = R.Index(); pm = P.PositionMap(); insp = RuleInspector(); plate = pm.plate_mask()
+    if a.inspector == "resnet":
+        from resnet_inspector import ResNetInspector
+        insp = ResNetInspector(threshold=a.threshold)
+    else:
+        insp = RuleInspector()
+    ix = R.Index(); pm = P.PositionMap(); plate = pm.plate_mask()
     if a.run:
         R.check_allowed(a.run)
         ev = [r for n in os.listdir(os.path.join(os.path.dirname(OUT), "events")) if n.startswith(f"events_run{a.run}_")
@@ -127,7 +135,7 @@ if __name__ == "__main__":
     else:
         jobs = [(ix.run_of_source(s) or "external", i + 1, s) for i, s in enumerate(a.sources)]
     rows, prev, K0 = [], None, None
-    out = os.path.join(a.out, f"run{a.run}" if a.run else "frames")
+    out = os.path.join(a.out, (f"run{a.run}" if a.run else "frames") + (f"_resnet_{a.threshold}" if a.inspector == "resnet" else ""))
     for run, event, src in jobs:
         img = load(ix, src)
         if a.k_from_events:

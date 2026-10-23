@@ -18,6 +18,12 @@ Writes (no timestamps, so the same commit + config + seed reproduces every byte)
   OUT/run.json                       config, seed, git commit, generator/config/twin hashes, USD version
   OUT/SHA256SUMS                     hash of every file above
 
+Training configs (D037) declare "twin_fix": "work1" and must then be run on the overlay twin built by twin_fix.py
+(the base lights and cap colour of gate run 2); the overlay is checked against its FIX.json and the original station.
+Their randomization ranges come from configs/recipe_dev.json (calibrate_recipe.py, DEV runs 1-3 only): one global
+exposure per scene for both lights, a light colour temperature, and a material per visible cap drawn from the DEV cap
+groups (saturated / pale: diffuse HSV + specular strength through ior).
+
 What this does NOT do: render, apply the lens, cut crops, or say anything about synthetic-to-real transfer. Labels
 are the physical truth of the twin scene ("any cap not fully seated" = crooked_cap); whether a state is visible to the
 camera is reported separately (cap_shift_px), and the claimed tilt range is decided by Session A, not here.
@@ -39,6 +45,7 @@ IN_TO_MM = 25.4
 STATES = ("pass", "missing_cap", "crooked_cap", "no_vial")       # the visual classes (cut_crops.py, README contract)
 LIGHTS = ("key_overhead", "fill_side")
 MATS = {"cap": "tw_cap_yellow", "plate": "tw_alu_brushed", "vial": "tw_vial_plastic"}
+CAP_MESH = "vial_cap"           # each G cap's mesh child; its material binding is authored here
 SEATED_TILT_TOL_DEG = 0.05      # readback: a cap within these of its as-shipped pose is fully seated
 SEATED_GAP_TOL_IN = 0.01 / IN_TO_MM
 GEOM_TOL_IN = 0.005             # physical checks (about 0.13 mm)
@@ -152,7 +159,22 @@ class Twin:
         self.cam = CapSealCam(self.cam_json)
         self.station_sha256, self.camera_sha256 = sha256_file(self.station), sha256_file(self.cam_json)
         self.layer = Sdf.Layer.FindOrOpen(self.station)          # held open: every scene stage reuses it
+        self.fix, self.base_station_sha256 = None, self.station_sha256
+        fix_json = os.path.join(self.dir, "FIX.json")
+        if os.path.isfile(fix_json):                              # overlay twin from twin_fix.py
+            self.fix = dict(json.load(open(fix_json)), fix_json_sha256=sha256_file(fix_json))
+            base = os.path.normpath(os.path.join(os.path.dirname(self.station), self.layer.subLayerPaths[0]))
+            self.base_station_sha256 = sha256_file(base)
+            if self.base_station_sha256 != self.fix["sha256"]["original_station"]:
+                raise ValueError(f"overlay sublayer {base} is not the station FIX.json was built on")
+            if self.station_sha256 != self.fix["sha256"]["overlay_station"]:
+                raise ValueError(f"{self.station} differs from the overlay recorded in FIX.json")
         st = Usd.Stage.Open(self.layer); xc = UsdGeom.XformCache()
+        self.base_intensity = {n: float(UsdLux.RectLight(st.GetPrimAtPath(f"{ROOT}/{n}").GetChildren()[0])
+                                        .GetIntensityAttr().Get()) for n in LIGHTS}
+        cap_sh = UsdShade.Shader(st.GetPrimAtPath(f"{ROOT}/_materials/{MATS['cap']}/Principled_BSDF"))
+        self.cap_inputs = [(i.GetBaseName(), i.GetTypeName(), i.Get()) for i in cap_sh.GetInputs()]
+        self.cap_hue = colorsys.rgb_to_hsv(*cap_sh.GetInput("diffuseColor").Get())[0]
         self.parent_world = np4(xc.GetLocalToWorldTransform(st.GetPrimAtPath(ROOT)))
         self.ids = [f"G{i:02d}" for i in range(1, 31)]
         self.pos = {}
@@ -182,6 +204,8 @@ class Twin:
         self.neighbors = {p: [q for q in self.ids if q != p and np.linalg.norm(base[p] - base[q]) < NEIGHBOR_IN]
                           for p in self.ids}
         self.cells = cells
+        self.grid_neighbors = {p: [q for q in self.ids if abs(cells[p][0] - cells[q][0]) + abs(cells[p][1] - cells[q][1]) == 1]
+                               for p in self.ids}
 
     def _plate_holes(self, st, xc):
         """Fit the Good plate's hole around each vial (circle in the seated tube frame) for the lean check."""
@@ -260,6 +284,10 @@ class PosSpec:
     lean_deg: float = 0.0
     lean_dir_deg: float = None
     lean_limit_deg: float = None
+    cap_group: str = None            # per-cap material (training recipe); None = the twin's cap material
+    cap_rgb: tuple = None
+    cap_ior: float = None
+    cap_roughness: float = None
 
 
 @dataclass
@@ -287,12 +315,15 @@ def make_pos(pid, state, variant=None, **kw):
 # ------------------------------------------------------------------------------------------------------------ config
 RANDOM_KEYS = {"name", "purpose", "schema", "mode", "n_scenes", "fixture", "placements", "states", "pass_variants",
                "crooked_variants", "lean_fraction", "tilt_deg", "lift_mm", "offset_mm", "lean_deg", "lighting",
-               "materials"}
+               "materials", "twin_fix", "crooked_adjacent", "recipe", "placements_mix"}
 SWEEP_KEYS = {"name", "purpose", "schema", "mode", "fixture", "angles_deg", "directions_deg", "pattern", "lighting",
-              "materials"}
+              "materials", "twin_fix", "recipe"}
 LIGHT_KEYS = {"intensity_scale", "color_temperature_k", "rotate_deg"}
+LIGHT_KEYS_EV = LIGHT_KEYS | {"exposure_ev"}            # + one global exposure per scene (training recipe)
 MAT_KEYS = {"cap_hue_shift", "cap_sat_scale", "cap_val_scale", "cap_roughness", "plate_val_scale", "plate_roughness",
             "vial_roughness"}
+MAT_KEYS_CAPS = {"cap_groups", "cap_roughness", "plate_val_scale", "plate_roughness", "vial_roughness"}   # per-cap materials
+CAP_GROUP_KEYS = {"weight", "hue_shift", "sat", "val", "spec_scale"}
 
 
 def _range(cfg, key, lo_ok=None, hi_ok=None):
@@ -337,18 +368,43 @@ def validate_config(cfg, twin=None):
         raise ConfigError(f"unknown config keys for mode {mode}: {sorted(unknown)}")
     if not isinstance(cfg.get("name"), str) or not cfg["name"].replace("_", "").isalnum():
         raise ConfigError("name: letters, digits and _ only")
-    for blk, allowed in (("lighting", LIGHT_KEYS), ("materials", MAT_KEYS)):
+    for blk, options in (("lighting", (LIGHT_KEYS, LIGHT_KEYS_EV)), ("materials", (MAT_KEYS, MAT_KEYS_CAPS))):
         b = cfg.get(blk)
         if b is None:
             continue
-        if not isinstance(b, dict) or set(b) != allowed:
-            raise ConfigError(f"{blk}: expected exactly {sorted(allowed)} (or null for the twin's own values)")
+        if not isinstance(b, dict) or set(b) not in options:
+            raise ConfigError(f"{blk}: expected exactly one of {[sorted(o) for o in options]} (or null for the twin's own values)")
         for k in b:
-            _range(b, k)
+            if k != "cap_groups":
+                _range(b, k)
+        if "cap_groups" in b:
+            _cap_groups(b["cap_groups"])
+    tf = cfg.get("twin_fix")
+    if tf is not None and not isinstance(tf, str):
+        raise ConfigError("twin_fix: the fix id of the overlay twin (e.g. 'work1')")
+    if twin is not None and tf != (twin.fix["fix"] if twin.fix else None):
+        raise ConfigError(f"config needs twin_fix {tf!r} but the twin has {twin.fix['fix'] if twin.fix else None!r} "
+                          "(use the overlay twin from twin_fix.py, or the original twin for configs without twin_fix)")
+    if "crooked_adjacent" in cfg and not isinstance(cfg["crooked_adjacent"], bool):
+        raise ConfigError("crooked_adjacent must be true or false")
+    if "recipe" in cfg:
+        rc = cfg["recipe"]
+        if not (isinstance(rc, dict) and set(rc) == {"file", "sha256"}):
+            raise ConfigError("recipe: {'file': <path under twin_to_line>, 'sha256': <hex>}")
+        path = os.path.join(HERE, rc["file"])
+        if not os.path.isfile(path) or sha256_file(path) != rc["sha256"]:
+            raise ConfigError(f"recipe: {rc['file']} is missing or differs from the sha256 the config was written from")
     if mode == "random":
         if not isinstance(cfg.get("n_scenes"), int) or cfg["n_scenes"] < 1:
             raise ConfigError("n_scenes must be a positive integer")
         _range(cfg, "placements", 0, 30)
+        if "placements_mix" in cfg:                  # [[weight, [lo, hi]], ...]: fill levels drawn from a mixture
+            mix = cfg["placements_mix"]
+            if not (isinstance(mix, list) and mix and all(isinstance(c, list) and len(c) == 2 and isinstance(c[0], (int, float))
+                                                          and c[0] >= 0 for c in mix)) or sum(c[0] for c in mix) <= 0:
+                raise ConfigError("placements_mix: [[weight, [lo, hi]], ...] with non-negative weights")
+            for _, rg in mix:
+                _range({"placements_mix range": rg}, "placements_mix range", *cfg["placements"])
         _weights(cfg, "states", STATES)
         _weights(cfg, "pass_variants", VARIANTS["pass"])
         _weights(cfg, "crooked_variants", VARIANTS["crooked_cap"])
@@ -369,6 +425,25 @@ def validate_config(cfg, twin=None):
             raise ConfigError("pattern must be 'checkerboard' (no two side-by-side neighbours tilted at once)")
 
 
+def _cap_groups(groups):
+    if not isinstance(groups, dict) or not groups:
+        raise ConfigError("cap_groups: {name: {weight, hue_shift, sat, val, spec_scale}}")
+    for name, g in groups.items():
+        if not isinstance(g, dict) or set(g) != CAP_GROUP_KEYS:
+            raise ConfigError(f"cap_groups.{name}: expected exactly {sorted(CAP_GROUP_KEYS)}")
+        if not isinstance(g["weight"], (int, float)) or g["weight"] < 0:
+            raise ConfigError(f"cap_groups.{name}.weight must be >= 0")
+        _range(g, "hue_shift", -0.5, 0.5); _range(g, "sat", 0, 1); _range(g, "val", 0, 1); _range(g, "spec_scale", 0, 20)
+    if sum(g["weight"] for g in groups.values()) <= 0:
+        raise ConfigError("cap_groups: weights sum to zero")
+
+
+def ior_for_spec(k):
+    """UsdPreviewSurface ior whose normal-incidence reflectance is k x the twin's (ior 1.5 -> F0 = 0.04)."""
+    f = (0.04 * k) ** 0.5
+    return (1 + f) / (1 - f)
+
+
 # ----------------------------------------------------------------------------------------------------------- sampling
 def _u(rng, r):
     return float(rng.uniform(r[0], r[1])) if r[1] > r[0] else float(r[0])
@@ -382,6 +457,13 @@ def _pick(rng, weights):
 def sample_lighting(rng, L):
     if L is None:
         return None
+    if "exposure_ev" in L:                       # one exposure for both lights, then a small per-light jitter
+        ev, ct, out = _u(rng, L["exposure_ev"]), _u(rng, L["color_temperature_k"]), {}
+        for name in LIGHTS:
+            j = _u(rng, L["intensity_scale"])
+            out[name] = {"exposure_ev": ev, "jitter": j, "intensity_scale": 2 ** ev * j, "color_temperature_k": ct,
+                         "rotate_xy_deg": [_u(rng, L["rotate_deg"]), _u(rng, L["rotate_deg"])]}
+        return out
     ct = _u(rng, L["color_temperature_k"])
     return {name: {"intensity_scale": _u(rng, L["intensity_scale"]), "color_temperature_k": ct,
                    "rotate_xy_deg": [_u(rng, L["rotate_deg"]), _u(rng, L["rotate_deg"])]} for name in LIGHTS}
@@ -390,7 +472,18 @@ def sample_lighting(rng, L):
 def sample_materials(rng, M):
     if M is None:
         return None
-    return {k: _u(rng, M[k]) for k in sorted(MAT_KEYS)}
+    return {k: _u(rng, M[k]) for k in sorted(MAT_KEYS if "cap_groups" not in M else MAT_KEYS_CAPS - {"cap_groups", "cap_roughness"})}
+
+
+def sample_cap(rng, M, hue0):
+    """One cap's material from the DEV cap groups: diffuse HSV around the twin's cap hue, specular strength as ior."""
+    if M is None or "cap_groups" not in M:
+        return {}
+    name = _pick(rng, {k: g["weight"] for k, g in M["cap_groups"].items()}); g = M["cap_groups"][name]
+    dh, s_, v_, k = (_u(rng, g[x]) for x in ("hue_shift", "sat", "val", "spec_scale"))
+    rgb = colorsys.hsv_to_rgb((hue0 + dh) % 1.0, s_, v_)
+    return {"cap_group": name, "cap_rgb": tuple(r6(x) for x in rgb), "cap_ior": r6(ior_for_spec(k)),
+            "cap_roughness": r6(_u(rng, M["cap_roughness"]))}
 
 
 def scene_rng(seed, index):
@@ -399,13 +492,21 @@ def scene_rng(seed, index):
 
 def sample_random_scene(cfg, twin, seed, index):
     rng = scene_rng(seed, index)
-    K = int(rng.integers(cfg["placements"][0], cfg["placements"][1] + 1))
-    specs = []
+    lo, hi = cfg["placements"]
+    if "placements_mix" in cfg:
+        w = np.array([c[0] for c in cfg["placements_mix"]], float)
+        lo, hi = cfg["placements_mix"][int(rng.choice(len(w), p=w / w.sum()))][1]
+    K = int(rng.integers(lo, hi + 1))
+    specs, crooked = [], set()
     for pid in twin.ids:
         i = twin.pos[pid]["index"]
         if i > K:
             specs.append(make_pos(pid, "no_vial", sequence="waiting")); continue
         state = _pick(rng, cfg["states"])
+        if state == "crooked_cap" and not cfg.get("crooked_adjacent", True) and crooked & set(twin.grid_neighbors[pid]):
+            state = _pick(rng, {k: w for k, w in cfg["states"].items() if k != "crooked_cap"})   # keep tilted caps apart
+        if state == "crooked_cap":
+            crooked.add(pid)
         if state == "no_vial":
             specs.append(make_pos(pid, "no_vial", sequence="missed_placement")); continue
         kw = {}
@@ -428,6 +529,8 @@ def sample_random_scene(cfg, twin, seed, index):
                 raise PhysicalError(f"{pid}: lean_deg lower bound {lo} exceeds the plate-hole limit {lim:.2f} deg "
                                     f"toward {az:.0f} deg")
             kw.update(lean_deg=_u(rng, [lo, min(hi, lim)]), lean_dir_deg=az, lean_limit_deg=lim)
+        if state != "missing_cap":
+            kw.update(sample_cap(rng, cfg.get("materials"), twin.cap_hue))
         specs.append(make_pos(pid, state, variant, **kw))
     return SceneSpec(f"{cfg['name']}_{index:05d}", index, int(seed), K, specs,
                      sample_lighting(rng, cfg.get("lighting")), sample_materials(rng, cfg.get("materials")))
@@ -448,10 +551,11 @@ def sweep_scene(cfg, twin, seed, index):
     specs = []
     for pid in twin.ids:
         r, c = twin.cells[pid]
+        cap = sample_cap(rng, cfg.get("materials"), twin.cap_hue)
         if (r + c) % 2 == parity and a > 0:
-            specs.append(make_pos(pid, "crooked_cap", "tilt", tilt_deg=a, tilt_dir_deg=d))
+            specs.append(make_pos(pid, "crooked_cap", "tilt", tilt_deg=a, tilt_dir_deg=d, **cap))
         else:
-            specs.append(make_pos(pid, "pass"))
+            specs.append(make_pos(pid, "pass", **cap))
     return SceneSpec(f"{cfg['name']}_{index:05d}", index, int(seed), 30, specs,
                      sample_lighting(rng, cfg.get("lighting")), sample_materials(rng, cfg.get("materials")))
 
@@ -524,15 +628,28 @@ def author_scene(twin, spec, scene_dir):
     if spec.materials:
         m = spec.materials
         sh = lambda key: UsdShade.Shader(stage.GetPrimAtPath(f"{ROOT}/_materials/{MATS[key]}/Principled_BSDF"))
-        cap = sh("cap"); c0 = cap.GetInput("diffuseColor").Get()
-        h, s_, v_ = colorsys.rgb_to_hsv(*c0)
-        rgb = colorsys.hsv_to_rgb((h + m["cap_hue_shift"]) % 1.0, min(1.0, s_ * m["cap_sat_scale"]),
-                                  min(1.0, v_ * m["cap_val_scale"]))
-        cap.GetInput("diffuseColor").Set(Gf.Vec3f(*rgb)); cap.GetInput("roughness").Set(float(m["cap_roughness"]))
+        if "cap_hue_shift" in m:                                 # one cap colour per scene (smoke)
+            cap = sh("cap"); c0 = cap.GetInput("diffuseColor").Get()
+            h, s_, v_ = colorsys.rgb_to_hsv(*c0)
+            rgb = colorsys.hsv_to_rgb((h + m["cap_hue_shift"]) % 1.0, min(1.0, s_ * m["cap_sat_scale"]),
+                                      min(1.0, v_ * m["cap_val_scale"]))
+            cap.GetInput("diffuseColor").Set(Gf.Vec3f(*rgb)); cap.GetInput("roughness").Set(float(m["cap_roughness"]))
         plate = sh("plate"); p0 = plate.GetInput("diffuseColor").Get()
         plate.GetInput("diffuseColor").Set(Gf.Vec3f(*[min(1.0, x * m["plate_val_scale"]) for x in p0]))
         plate.GetInput("roughness").Set(float(m["plate_roughness"]))
         sh("vial").GetInput("roughness").Set(float(m["vial_roughness"]))
+    for s in spec.positions:                                     # per-cap materials (training recipe)
+        if s.cap_rgb is None:
+            continue
+        mpath = f"{ROOT}/_materials/ignite_cap_{s.position}"
+        mat = UsdShade.Material.Define(stage, mpath)
+        shd = UsdShade.Shader.Define(stage, mpath + "/Principled_BSDF"); shd.CreateIdAttr("UsdPreviewSurface")
+        for name, tname, val in twin.cap_inputs:
+            shd.CreateInput(name, tname).Set(val)
+        shd.GetInput("diffuseColor").Set(Gf.Vec3f(*s.cap_rgb)); shd.GetInput("ior").Set(float(s.cap_ior))
+        shd.GetInput("roughness").Set(float(s.cap_roughness))
+        mat.CreateSurfaceOutput().ConnectToSource(shd.ConnectableAPI(), "surface")
+        UsdShade.MaterialBindingAPI(stage.GetPrimAtPath(f"{ROOT}/{s.position}_cap/{CAP_MESH}")).Bind(mat)
     layer.Save()
     return path
 
@@ -599,6 +716,12 @@ def read_back(twin, scene_path):
             dd = top_px - top0_px
             r["cap_top_dir_img_deg"] = float(np.degrees(np.arctan2(dd[1], dd[0])) % 360) if np.linalg.norm(dd) > 1e-3 else None
         r["bbox_px"] = bbox(twin.cam.project(np.vstack(drawn))[0]) if drawn else None
+        if hc and hv:
+            mat = UsdShade.MaterialBindingAPI(st.GetPrimAtPath(f"{cp}/{CAP_MESH}")).ComputeBoundMaterial()[0]
+            shd = mat.ComputeSurfaceSource()[0]
+            r["cap_material"] = str(mat.GetPath())
+            r["cap_rgb"] = [float(x) for x in shd.GetInput("diffuseColor").Get()]
+            r["cap_ior"], r["cap_roughness"] = float(shd.GetInput("ior").Get()), float(shd.GetInput("roughness").Get())
         out[pid] = r
     lights = {}
     for name in LIGHTS:
@@ -681,6 +804,13 @@ def spec_mismatches(twin, spec, rb):
                 checks.append(("tilt_dir_deg", 0.0, ((r["tilt_dir_deg"] - s.tilt_dir_deg + 180) % 360) - 180, 1e-3))
         if s.lean_deg > 0:
             checks.append(("lean_dir_deg", 0.0, ((r["lean_dir_deg"] - s.lean_dir_deg + 180) % 360) - 180, 1e-3))
+        if s.state != "missing_cap":
+            want_mat = f"{ROOT}/_materials/" + (f"ignite_cap_{s.position}" if s.cap_rgb is not None else MATS["cap"])
+            if r.get("cap_material") != want_mat:
+                bad.append(f"{s.position}: cap material {r.get('cap_material')}, authored {want_mat}")
+            elif s.cap_rgb is not None:
+                checks += [("cap_ior", s.cap_ior, r["cap_ior"], 1e-5), ("cap_roughness", s.cap_roughness, r["cap_roughness"], 1e-6)]
+                checks += [(f"cap_rgb[{k}]", s.cap_rgb[k], r["cap_rgb"][k], 1e-6) for k in range(3)]
         for name, want, got, tol in checks:
             if abs(want - got) > tol:
                 bad.append(f"{s.position}: {name} authored {want:.6f}, read back {got:.6f}")
@@ -689,6 +819,8 @@ def spec_mismatches(twin, spec, rb):
             got, want = rb["lights"][name], spec.lighting[name]
             if got["color_temperature_k"] is None or abs(got["color_temperature_k"] - want["color_temperature_k"]) > 0.01:
                 bad.append(f"{name}: colour temperature not read back")
+            if abs(got["intensity"] - twin.base_intensity[name] * want["intensity_scale"]) > 1e-6 * got["intensity"]:
+                bad.append(f"{name}: intensity {got['intensity']:.3f}, authored {twin.base_intensity[name] * want['intensity_scale']:.3f}")
     return bad
 
 
@@ -714,7 +846,7 @@ def camera_issues(twin, rb):
 MANIFEST_COLS = ["image", "scene_id", "scene_file", "position", "index", "label", "sequence", "variant", "placements",
                  "tilt_deg", "tilt_dir_deg", "cap_top_dir_img_deg", "lift_mm", "seat_gap_max_mm", "offset_mm",
                  "lean_deg", "lean_dir_deg", "lean_limit_deg", "cap_shift_px", "cap_max_shift_px",
-                 "bbox_px", "anchor_bbox_px", "bbox_in_crop", "light_id", "material_id", "seed", "config_sha12",
+                 "bbox_px", "anchor_bbox_px", "bbox_in_crop", "light_id", "material_id", "cap_group", "seed", "config_sha12",
                  "generator_sha12"]
 
 
@@ -747,6 +879,9 @@ def labels_json(spec, rb, crop_boxes, station_rel):
         if "cap_shift_px" in r:
             o["cap_shift_px"] = r6(r["cap_shift_px"]); o["cap_max_shift_px"] = r6(r["cap_max_shift_px"])
             o["cap_top_dir_img_deg"] = r6(r["cap_top_dir_img_deg"])
+        if s.cap_rgb is not None and r["state"] != "missing_cap":
+            o["cap_group"] = s.cap_group; o["cap_rgb"] = [r6(x) for x in r["cap_rgb"]]
+            o["cap_ior"] = r6(r["cap_ior"]); o["cap_roughness"] = r6(r["cap_roughness"])
         o["authored"] = s.state
         rows.append(o)
     return {"scene_id": spec.scene_id, "index": spec.index, "seed": spec.seed, "station": station_rel,
@@ -767,7 +902,7 @@ def manifest_rows(spec, lab, scene_file, cfg_sha, gen_sha):
                     "cap_shift_px": g("cap_shift_px"), "cap_max_shift_px": g("cap_max_shift_px"),
                     "bbox_px": " ".join(map(str, o["bbox_px"])) if o.get("bbox_px") else "",
                     "anchor_bbox_px": " ".join(map(str, o["anchor_bbox_px"])), "bbox_in_crop": g("bbox_in_crop"),
-                    "light_id": lab["light_id"], "material_id": lab["material_id"], "seed": spec.seed,
+                    "light_id": lab["light_id"], "material_id": lab["material_id"], "cap_group": g("cap_group"), "seed": spec.seed,
                     "config_sha12": cfg_sha[:12], "generator_sha12": gen_sha[:12]})
     return out
 
@@ -809,6 +944,10 @@ def generate(twin, cfg, cfg_sha, out_dir, seed=0, limit=None, log=print):
             counts[o["state"]] += 1
         sc = {"scene_id": spec.scene_id, "index": idx, "seed": seed, "placements": spec.placements,
               "light_id": lab["light_id"], "material_id": lab["material_id"]}
+        if spec.lighting and "exposure_ev" in spec.lighting[LIGHTS[0]]:
+            sc["exposure_ev"] = r6(spec.lighting[LIGHTS[0]]["exposure_ev"])
+        if any(s.cap_group for s in spec.positions):
+            sc["pale_caps"] = sum(o.get("cap_group") == "pale" for o in lab["positions"])
         for name in LIGHTS:
             L = rb["lights"][name]
             sc[f"{name}_intensity"] = r6(L["intensity"]); sc[f"{name}_ct_k"] = r6(L["color_temperature_k"])
@@ -825,6 +964,8 @@ def generate(twin, cfg, cfg_sha, out_dir, seed=0, limit=None, log=print):
     run = {"generator": "gen_scenes.py", "generator_sha256": gen_sha, "config": cfg, "config_sha256": cfg_sha,
            "seed": seed, "scenes": N, "labels": N * 30, "label_counts": counts, "git_commit": commit,
            "git_dirty_tracked": dirty, "station_sha256": twin.station_sha256, "camera_sha256": twin.camera_sha256,
+           "base_station_sha256": twin.base_station_sha256,
+           "twin_fix": None if twin.fix is None else {k: twin.fix[k] for k in ("fix", "fix_json_sha256", "sha256")},
            "position_map_sha256": sha256_file(MAP_PATH), "usd_version": ".".join(map(str, Usd.GetVersion())),
            "numpy_version": np.__version__, "python_version": sys.version.split()[0],
            "reproducible_given": "same generator, config, seed, twin files, USD and NumPy versions",
@@ -886,7 +1027,7 @@ def selftest(twin, log=print):
             fails.append(f"{p['position']}: seated cap centre {r['cap_center_px'].round(2)} vs map {p['cap_center_px']}")
         if r["anchor_bbox_px"] != p["anchor_bbox_px"]:
             fails.append(f"{p['position']}: anchor box {r['anchor_bbox_px']} vs map {p['anchor_bbox_px']}")
-    if pm["meta"].get("station_sha256") != twin.station_sha256:
+    if pm["meta"].get("station_sha256") != twin.base_station_sha256:
         fails.append("position_map_G.json was exported from a different station file")
     # 2) every state and variant, read back and checked
     spec = selftest_spec(twin)

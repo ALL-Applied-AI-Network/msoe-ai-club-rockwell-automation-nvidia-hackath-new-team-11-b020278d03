@@ -23,6 +23,9 @@ Fixed before any training render existed (Oct 23):
               between the highest non-defect and the lowest defect score on synthetic validation, because the 99.5 %
               rule degenerates when validation separates perfectly. thresholds_d038.json carries it and the
               pre-registered t_defect, reported side by side. `--d038 OUT` writes it for a finished run.
+  D040 (v2)   --aug configs/aug_v2.json: v1's camera aug plus L* shift and contrast, b* shift and Gaussian blur, with
+              noise sigma 0-2.8; each change backed by a DEV probe (v2_cue.py). If validation scores overlap (no empty
+              gap), thresholds_d038.json deploys the pre-registered threshold instead (flagged d040_fallback).
 Outputs (OUT, gitignored): model.pt, thresholds.json, thresholds_d038.json, train_log.csv, val_predictions.csv,
 run.json (data and code hashes, versions, seed), and the sha256 of model.pt in run.json.
 """
@@ -78,6 +81,34 @@ class CameraAug:
         x = srgb_enc(np.clip(lin, 0, 1))[..., ::-1] * 255 + rng.normal(0, rng.uniform(*self.noise), crop.shape)
         x = np.clip(np.round(x), 0, 255).astype(np.uint8)
         return cv2.imdecode(cv2.imencode(".jpg", x, [cv2.IMWRITE_JPEG_QUALITY, self.q])[1], cv2.IMREAD_COLOR)
+
+
+class CameraAugV2(CameraAug):
+    """D040: per crop, L* shift and contrast about the crop mean and a b* shift (CIELAB), then v1's green gain in
+    linear light, a Gaussian blur, noise (sigma from the v2 range) and JPEG at v1's quality. Window shift as v1."""
+
+    def __init__(self, recipe, v2):
+        super().__init__(recipe)
+        self.noise = tuple(v2["noise_sigma_8bit"]); self.blur = tuple(v2["blur_sigma"])
+        self.dL, self.cL, self.db = tuple(v2["L_shift"]), tuple(v2["L_contrast"]), tuple(v2["b_shift"])
+
+    def __call__(self, crop, rng):
+        dl, c, db, g, s, n = (rng.uniform(*r) for r in (self.dL, self.cL, self.db, self.gain, self.blur, self.noise))
+        lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB).astype(np.float32)
+        L = lab[..., 0] * (100 / 255); m = L.mean()
+        lab[..., 0] = np.clip((L - m) * c + m + dl, 0, 100) * (255 / 100); lab[..., 2] = np.clip(lab[..., 2] + db, 0, 255)
+        x = cv2.cvtColor(np.round(lab).astype(np.uint8), cv2.COLOR_LAB2BGR)
+        lin = srgb_dec(x[..., ::-1].astype(np.float32) / 255); lin[..., 1] *= g
+        x = (srgb_enc(np.clip(lin, 0, 1))[..., ::-1] * 255).astype(np.float32)
+        if s >= 0.05:
+            x = cv2.GaussianBlur(x, (0, 0), s)
+        x = np.clip(np.round(x + rng.normal(0, n, crop.shape)), 0, 255).astype(np.uint8)
+        return cv2.imdecode(cv2.imencode(".jpg", x, [cv2.IMWRITE_JPEG_QUALITY, self.q])[1], cv2.IMREAD_COLOR)
+
+
+def make_aug(recipe, aug_path=None):
+    """v1 (no aug file) or D040's v2 (configs/aug_v2.json)."""
+    return CameraAugV2(recipe, json.load(open(aug_path))) if aug_path else CameraAug(recipe)
 
 
 class CropSet:
@@ -155,7 +186,7 @@ def choose_threshold(probs, y):
             "n_val": int(len(y)), "n_val_defects": int(d.sum())}
 
 
-def gap_threshold(probs, y, t_preregistered, source):
+def gap_threshold(probs, y, t_preregistered, source, fallback_preregistered=False):
     """D038 (Oct 23, before any DEV evaluation): t = midpoint of the empty gap between the highest non-defect score and
     the lowest defect score on synthetic validation. The 99.5 % rule degenerates when validation separates perfectly
     (it puts t at the top of the defect scores). D038 covers only that case: if the scores overlap, t is None and a
@@ -163,10 +194,14 @@ def gap_threshold(probs, y, t_preregistered, source):
     s = probs[:, DEFECTS].sum(1); d = np.isin(y, DEFECTS)
     hi, lo = float(s[~d].max()), float(s[d].min())
     t = (hi + lo) / 2 if lo > hi else None
+    fallback = t is None and fallback_preregistered and t_preregistered is not None
+    if fallback:                                       # D040: no empty gap -> the pre-registered 99.5 % threshold
+        t = t_preregistered
     out = {"decision": "D038", "rule": "t = midpoint of the empty gap between the highest non-defect score and the lowest "
                                        "defect score on synthetic validation; s = P(missing_cap) + P(crooked_cap); s >= t -> "
                                        "the more likely defect class, else the more likely of pass / no_vial",
            "t_defect": t, "gap": {"max_non_defect_score": hi, "min_defect_score": lo, "width": lo - hi},
+           **({"d040_fallback": "no empty gap: the pre-registered 99.5 %-recall threshold is deployed (D040)"} if fallback else {}),
            "t_defect_preregistered": t_preregistered, "source": source, "n_val": int(len(y)), "n_val_defects": int(d.sum())}
     if t is not None:
         pred = decide(probs, t); mean = lambda v: float(np.mean(v)) if len(v) else None
@@ -195,6 +230,7 @@ def main():
     ap.add_argument("--device", default="mps"); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--recipe", default=os.path.join(P.HERE, "configs", "recipe_dev.json"))
     ap.add_argument("--d038", metavar="OUT", help="write thresholds_d038.json for a finished run and exit")
+    ap.add_argument("--aug", help="v2 augmentation file (configs/aug_v2.json, D040); default: v1's camera aug")
     a = ap.parse_args()
     if a.d038:
         th = write_d038(a.d038)
@@ -206,7 +242,7 @@ def main():
     if os.path.exists(os.path.join(a.out, "model.pt")):
         sys.exit(f"{a.out} already has a model; use a new output folder")
     device = torch.device(a.device if (a.device != "mps" or torch.backends.mps.is_available()) else "cpu")
-    aug = CameraAug(json.load(open(a.recipe)))
+    aug = make_aug(json.load(open(a.recipe)), a.aug)
     t0 = time.time()
     train, val = CropSet(a.data, "train", aug, seed=None), CropSet(a.data, "val", aug, seed=a.seed + 1)
     counts = np.bincount([it[2] for it in train.items], minlength=4)
@@ -236,7 +272,7 @@ def main():
     torch.save(model.state_dict(), os.path.join(a.out, "model.pt"))
     th = choose_threshold(pv, yv)
     json.dump(th, open(os.path.join(a.out, "thresholds.json"), "w"), indent=1)
-    json.dump(gap_threshold(pv, yv, th["t_defect"], {"note": "validation probabilities in memory"}),
+    json.dump(gap_threshold(pv, yv, th["t_defect"], {"note": "validation probabilities in memory"}, fallback_preregistered=bool(a.aug)),
               open(os.path.join(a.out, "thresholds_d038.json"), "w"), indent=1)
     with open(os.path.join(a.out, "val_predictions.csv"), "w", newline="") as f:
         wr = csv.writer(f); wr.writerow(["scene_id", "position", "label", "variant", "cap_group"] + [f"p_{c}" for c in CLASSES])
@@ -251,6 +287,7 @@ def main():
            "data": [{"dir": os.path.abspath(d), "crops_csv_sha256": sha256(os.path.join(d, "crops.csv"))} for d in a.data],
            "train_counts": dict(zip(CLASSES, counts.tolist())), "n_val": len(val),
            "recipe_sha256": sha256(a.recipe), "train_resnet_sha256": sha256(os.path.abspath(__file__)), "git_commit": commit,
+           "aug": None if not a.aug else {"file": os.path.relpath(os.path.abspath(a.aug), P.HERE), "sha256": sha256(a.aug)},
            "torch": torch.__version__, "torchvision": torchvision.__version__, "python": platform.python_version(),
            "model_pt_sha256": sha256(os.path.join(a.out, "model.pt")), "thresholds_sha256": sha256(os.path.join(a.out, "thresholds.json")),
            "thresholds_d038_sha256": sha256(os.path.join(a.out, "thresholds_d038.json")),

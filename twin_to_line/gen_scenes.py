@@ -45,6 +45,9 @@ IN_TO_MM = 25.4
 STATES = ("pass", "missing_cap", "crooked_cap", "no_vial")       # the visual classes (cut_crops.py, README contract)
 LIGHTS = ("key_overhead", "fill_side")
 MATS = {"cap": "tw_cap_yellow", "plate": "tw_alu_brushed", "vial": "tw_vial_plastic"}
+FLOOR_MAT = "ignite_hole_floor"                                  # work2 overlay (twin_fix2.py, D040)
+FLOOR_KEYS = {"val_scale", "roughness", "blue_scale"}
+FLOOR_STREAM = 40                                                # its own random stream: other draws stay as they were
 CAP_MESH = "vial_cap"           # each G cap's mesh child; its material binding is authored here
 SEATED_TILT_TOL_DEG = 0.05      # readback: a cap within these of its as-shipped pose is fully seated
 SEATED_GAP_TOL_IN = 0.01 / IN_TO_MM
@@ -172,6 +175,8 @@ class Twin:
         st = Usd.Stage.Open(self.layer); xc = UsdGeom.XformCache()
         self.base_intensity = {n: float(UsdLux.RectLight(st.GetPrimAtPath(f"{ROOT}/{n}").GetChildren()[0])
                                         .GetIntensityAttr().Get()) for n in LIGHTS}
+        fl = st.GetPrimAtPath(f"{ROOT}/_materials/{FLOOR_MAT}/Principled_BSDF")
+        self.floor_base = tuple(UsdShade.Shader(fl).GetInput("diffuseColor").Get()) if fl.IsValid() else None
         cap_sh = UsdShade.Shader(st.GetPrimAtPath(f"{ROOT}/_materials/{MATS['cap']}/Principled_BSDF"))
         self.cap_inputs = [(i.GetBaseName(), i.GetTypeName(), i.Get()) for i in cap_sh.GetInputs()]
         self.cap_hue = colorsys.rgb_to_hsv(*cap_sh.GetInput("diffuseColor").Get())[0]
@@ -299,6 +304,7 @@ class SceneSpec:
     positions: list
     lighting: dict = None            # None = the twin's own lights
     materials: dict = None           # None = the twin's own materials
+    floor: dict = None               # None = the twin's own hole floor (D040 floor block on the work2 overlay)
 
 
 VARIANTS = {"pass": ("seated", "offset"), "crooked_cap": ("tilt", "lift"), "missing_cap": ("uncapped",),
@@ -315,9 +321,9 @@ def make_pos(pid, state, variant=None, **kw):
 # ------------------------------------------------------------------------------------------------------------ config
 RANDOM_KEYS = {"name", "purpose", "schema", "mode", "n_scenes", "fixture", "placements", "states", "pass_variants",
                "crooked_variants", "lean_fraction", "tilt_deg", "lift_mm", "offset_mm", "lean_deg", "lighting",
-               "materials", "twin_fix", "crooked_adjacent", "recipe", "placements_mix"}
+               "materials", "twin_fix", "crooked_adjacent", "recipe", "placements_mix", "floor"}
 SWEEP_KEYS = {"name", "purpose", "schema", "mode", "fixture", "angles_deg", "directions_deg", "pattern", "lighting",
-              "materials", "twin_fix", "recipe"}
+              "materials", "twin_fix", "recipe", "floor"}
 LIGHT_KEYS = {"intensity_scale", "color_temperature_k", "rotate_deg"}
 LIGHT_KEYS_EV = LIGHT_KEYS | {"exposure_ev"}            # + one global exposure per scene (training recipe)
 MAT_KEYS = {"cap_hue_shift", "cap_sat_scale", "cap_val_scale", "cap_roughness", "plate_val_scale", "plate_roughness",
@@ -385,6 +391,15 @@ def validate_config(cfg, twin=None):
     if twin is not None and tf != (twin.fix["fix"] if twin.fix else None):
         raise ConfigError(f"config needs twin_fix {tf!r} but the twin has {twin.fix['fix'] if twin.fix else None!r} "
                           "(use the overlay twin from twin_fix.py, or the original twin for configs without twin_fix)")
+    if "floor" in cfg:
+        fb = cfg["floor"]
+        if not isinstance(fb, dict) or set(fb) != FLOOR_KEYS:
+            raise ConfigError(f"floor: expected exactly {sorted(FLOOR_KEYS)}")
+        _range(fb, "val_scale", 0.0); _range(fb, "roughness", 0.0, 1.0)
+        if not isinstance(fb["blue_scale"], (int, float)) or fb["blue_scale"] <= 0:
+            raise ConfigError("floor: blue_scale must be a positive number")
+        if twin is not None and twin.floor_base is None:
+            raise ConfigError(f"floor needs the work2 overlay twin ({FLOOR_MAT}, twin_fix2.py)")
     if "crooked_adjacent" in cfg and not isinstance(cfg["crooked_adjacent"], bool):
         raise ConfigError("crooked_adjacent must be true or false")
     if "recipe" in cfg:
@@ -564,8 +579,20 @@ def n_scenes(cfg):
     return cfg["n_scenes"] if cfg["mode"] == "random" else len(sweep_cases(cfg))
 
 
+def sample_floor(fb, base, seed, index):
+    """D040 hole floor for one scene, from its own stream (seed, index, FLOOR_STREAM): value x val_scale, blue x
+    blue_scale, roughness. Drawn after everything else, so every other per-scene value is unchanged."""
+    rng = np.random.default_rng([int(seed), int(index), FLOOR_STREAM])
+    v, r = _u(rng, fb["val_scale"]), _u(rng, fb["roughness"])
+    rgb = [min(1.0, base[0] * v), min(1.0, base[1] * v), min(1.0, base[2] * v * fb["blue_scale"])]
+    return {"val_scale": r6(v), "blue_scale": r6(fb["blue_scale"]), "roughness": r6(r), "rgb": [r6(x) for x in rgb]}
+
+
 def build_spec(cfg, twin, seed, index):
-    return (sample_random_scene if cfg["mode"] == "random" else sweep_scene)(cfg, twin, seed, index)
+    spec = (sample_random_scene if cfg["mode"] == "random" else sweep_scene)(cfg, twin, seed, index)
+    if cfg.get("floor"):
+        spec.floor = sample_floor(cfg["floor"], twin.floor_base, seed, index)
+    return spec
 
 
 # ----------------------------------------------------------------------------------------------------------- authoring
@@ -638,6 +665,9 @@ def author_scene(twin, spec, scene_dir):
         plate.GetInput("diffuseColor").Set(Gf.Vec3f(*[min(1.0, x * m["plate_val_scale"]) for x in p0]))
         plate.GetInput("roughness").Set(float(m["plate_roughness"]))
         sh("vial").GetInput("roughness").Set(float(m["vial_roughness"]))
+    if spec.floor:                                               # D040 hole floor (work2 material)
+        fs = UsdShade.Shader(stage.GetPrimAtPath(f"{ROOT}/_materials/{FLOOR_MAT}/Principled_BSDF"))
+        fs.GetInput("diffuseColor").Set(Gf.Vec3f(*spec.floor["rgb"])); fs.GetInput("roughness").Set(float(spec.floor["roughness"]))
     for s in spec.positions:                                     # per-cap materials (training recipe)
         if s.cap_rgb is None:
             continue
@@ -731,10 +761,16 @@ def read_back(twin, scene_path):
                         "color_temperature_k": float(lp.GetColorTemperatureAttr().Get()) if en else None,
                         "rotate_xyz_deg": [float(x) for x in xf.GetAttribute("xformOp:rotateXYZ").Get()]}
     mats = {}
-    for key, name in MATS.items():
-        s = UsdShade.Shader(st.GetPrimAtPath(f"{ROOT}/_materials/{name}/Principled_BSDF"))
+    for key, name in list(MATS.items()) + [("floor", FLOOR_MAT)]:
+        prim = st.GetPrimAtPath(f"{ROOT}/_materials/{name}/Principled_BSDF")
+        if key == "floor" and not prim.IsValid():
+            continue                                             # no work2 overlay: nothing to read
+        s = UsdShade.Shader(prim)
         mats[key] = {"diffuseColor": [float(x) for x in s.GetInput("diffuseColor").Get()],
                      "roughness": float(s.GetInput("roughness").Get())}
+    floor_mesh = st.GetPrimAtPath(f"{ROOT}/tray_good_support/tray_good_support")
+    if "floor" in mats and floor_mesh.IsValid():
+        mats["floor"]["bound_to_floor_mesh"] = str(UsdShade.MaterialBindingAPI(floor_mesh).ComputeBoundMaterial()[0].GetPath()).endswith(FLOOR_MAT)
     cam = np4(xc.GetLocalToWorldTransform(st.GetPrimAtPath(f"{ROOT}/CapSealCam/CapSealCam")))
     return {"positions": out, "lights": lights, "materials": mats, "camera_world": cam, "stage": st}
 
@@ -814,6 +850,16 @@ def spec_mismatches(twin, spec, rb):
         for name, want, got, tol in checks:
             if abs(want - got) > tol:
                 bad.append(f"{s.position}: {name} authored {want:.6f}, read back {got:.6f}")
+    if spec.floor:
+        f = rb["materials"].get("floor")
+        if not f or not f.get("bound_to_floor_mesh"):
+            bad.append(f"hole floor: {FLOOR_MAT} missing or not bound to tray_good_support")
+        else:
+            for k in range(3):
+                if abs(f["diffuseColor"][k] - spec.floor["rgb"][k]) > 1e-6:
+                    bad.append(f"hole floor rgb[{k}] authored {spec.floor['rgb'][k]:.6f}, read back {f['diffuseColor'][k]:.6f}")
+            if abs(f["roughness"] - spec.floor["roughness"]) > 1e-6:
+                bad.append(f"hole floor roughness authored {spec.floor['roughness']:.6f}, read back {f['roughness']:.6f}")
     if spec.lighting:
         for name in LIGHTS:
             got, want = rb["lights"][name], spec.lighting[name]
@@ -884,9 +930,12 @@ def labels_json(spec, rb, crop_boxes, station_rel):
             o["cap_ior"] = r6(r["cap_ior"]); o["cap_roughness"] = r6(r["cap_roughness"])
         o["authored"] = s.state
         rows.append(o)
-    return {"scene_id": spec.scene_id, "index": spec.index, "seed": spec.seed, "station": station_rel,
-            "placements": spec.placements, "lighting": spec.lighting, "materials": spec.materials,
-            "light_id": short_id(spec.lighting), "material_id": short_id(spec.materials), "positions": rows}
+    out = {"scene_id": spec.scene_id, "index": spec.index, "seed": spec.seed, "station": station_rel,
+           "placements": spec.placements, "lighting": spec.lighting, "materials": spec.materials,
+           "light_id": short_id(spec.lighting), "material_id": short_id(spec.materials), "positions": rows}
+    if spec.floor:                                               # only with a floor block: v1 labels are unchanged
+        out["floor"] = spec.floor
+    return out
 
 
 def manifest_rows(spec, lab, scene_file, cfg_sha, gen_sha):
@@ -917,7 +966,7 @@ def git_state():
         return "unknown", None
 
 
-def generate(twin, cfg, cfg_sha, out_dir, seed=0, limit=None, log=print):
+def generate(twin, cfg, cfg_sha, out_dir, seed=0, limit=None, log=print, indices=None):
     """Author, read back and check every scene; write labels, manifest and provenance. Raises on any mismatch."""
     if os.path.exists(out_dir) and os.listdir(out_dir):
         raise FileExistsError(f"{out_dir} is not empty; pick a new output folder")
@@ -926,9 +975,13 @@ def generate(twin, cfg, cfg_sha, out_dir, seed=0, limit=None, log=print):
     pmap = PositionMap(MAP_PATH, offset=(0, 0))
     crop_boxes = [pmap.crop_box(i)[0] for i in range(30)]
     N = n_scenes(cfg) if limit is None else min(limit, n_scenes(cfg))
+    todo = list(range(N)) if indices is None else list(indices)
+    if indices is not None and (not todo or min(todo) < 0 or max(todo) >= n_scenes(cfg) or len(set(todo)) != len(todo)):
+        raise ConfigError(f"indices must be distinct and within 0..{n_scenes(cfg) - 1}")
+    N = len(todo)
     manifest, scenes = [], []
     counts = {k: 0 for k in STATES}
-    for idx in range(N):
+    for k_, idx in enumerate(todo):
         spec = build_spec(cfg, twin, seed, idx)
         sdir = os.path.join(out_dir, "scenes", spec.scene_id)
         path = author_scene(twin, spec, sdir)
@@ -952,17 +1005,17 @@ def generate(twin, cfg, cfg_sha, out_dir, seed=0, limit=None, log=print):
             L = rb["lights"][name]
             sc[f"{name}_intensity"] = r6(L["intensity"]); sc[f"{name}_ct_k"] = r6(L["color_temperature_k"])
             sc[f"{name}_rot_xyz"] = " ".join(f"{x:.4f}" for x in L["rotate_xyz_deg"])
-        for key in MATS:
+        for key in list(MATS) + (["floor"] if spec.floor else []):
             M = rb["materials"][key]
             sc[f"{key}_rgb"] = " ".join(f"{x:.5f}" for x in M["diffuseColor"]); sc[f"{key}_roughness"] = r6(M["roughness"])
         scenes.append(sc)
-        if (idx + 1) % 25 == 0 or idx + 1 == N:
-            log(f"  {idx + 1}/{N} scenes")
+        if (k_ + 1) % 25 == 0 or k_ + 1 == N:
+            log(f"  {k_ + 1}/{N} scenes")
     _write_csv(os.path.join(out_dir, "manifest.csv"), MANIFEST_COLS, manifest)
     _write_csv(os.path.join(out_dir, "scenes.csv"), list(scenes[0]), scenes)
     commit, dirty = git_state()
     run = {"generator": "gen_scenes.py", "generator_sha256": gen_sha, "config": cfg, "config_sha256": cfg_sha,
-           "seed": seed, "scenes": N, "labels": N * 30, "label_counts": counts, "git_commit": commit,
+           "seed": seed, "scenes": N, "labels": N * 30, **({"indices": todo} if indices is not None else {}), "label_counts": counts, "git_commit": commit,
            "git_dirty_tracked": dirty, "station_sha256": twin.station_sha256, "camera_sha256": twin.camera_sha256,
            "base_station_sha256": twin.base_station_sha256,
            "twin_fix": None if twin.fix is None else {k: twin.fix[k] for k in ("fix", "fix_json_sha256", "sha256")},
@@ -1086,6 +1139,7 @@ def main(argv=None):
     ap.add_argument("--config", help="configs/smoke.json, configs/tilt_sweep.json, ...")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--limit", type=int, help="only the first N scenes (scene i is the same with or without it)")
+    ap.add_argument("--indices", help="only these scene indices, comma-separated (scene i is the same either way)")
     ap.add_argument("--selftest", action="store_true", help="check authoring, readback and physical rules on the twin")
     a = ap.parse_args(argv)
     twin = Twin(a.twin)
@@ -1107,8 +1161,12 @@ def main(argv=None):
         cfg, cfg_sha = load_config(a.config, twin)
     except ConfigError as e:
         ap.error(f"config: {e}")
-    print(f"{cfg['name']}: {n_scenes(cfg) if a.limit is None else min(a.limit, n_scenes(cfg))} scenes, seed {a.seed}")
-    run = generate(twin, cfg, cfg_sha, a.out, a.seed, a.limit)
+    idx = [int(x) for x in a.indices.split(",")] if a.indices else None
+    print(f"{cfg['name']}: {len(idx) if idx else n_scenes(cfg) if a.limit is None else min(a.limit, n_scenes(cfg))} scenes, seed {a.seed}")
+    try:
+        run = generate(twin, cfg, cfg_sha, a.out, a.seed, a.limit, indices=idx)
+    except ConfigError as e:
+        ap.error(f"indices: {e}")
     print(f"labels OK: {run['scenes']}x30 read back from the composed stages and match the authored states")
     print("physical checks OK (seat height, cap on vial, plate hole, neighbour collisions)")
     print("label counts:", ", ".join(f"{k} {v}" for k, v in run["label_counts"].items()))

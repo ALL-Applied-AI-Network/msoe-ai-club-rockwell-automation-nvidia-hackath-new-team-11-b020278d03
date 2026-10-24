@@ -24,7 +24,7 @@ YAAD team code).
 - Working setup: ChatGPT = technical lead/reviewer, Claude = implementation engineer, Noor = product owner (final calls,
   talks to teammates/organizers). Noor is a Code Crusaders **member, not captain**: "compare and decide together".
 
-## Status (Fri Oct 23, night)
+## Status (Sat Oct 24)
 ### 1. Completed and verified
 - **Scene generator** on local branch `feat/scene-generator`, commit `5c69c9f` (parent `2189e3a`, PR #1's branch
   `feat/organizer-feedback-integration`). New: `gen_scenes.py`, `configs/smoke.json` (300 scene definitions),
@@ -143,6 +143,26 @@ YAAD team code).
     offline as arm A. The step-9 inspector choice is Noor's.
   - Files (gitignored): `results/g3/resnet18_v1/` (`g3_report.json`, predictions per arm, `probabilities.csv`,
     `annotated/`).
+- **v2 attempt (D040, Sat Oct 24): check render failed 3 tries → no batch, no v2 model, no v2 G3.** `cc-isaac-gate-2`,
+  code `5fd0930`; `twin_fix2 --check` OK, selftest passed, 18/18 check renders ok. Medians, 87 empty / 27 uncapped crops:
+
+  | | real DEV | train_v1 | try 1 | try 2 | try 3 |
+  |---|---|---|---|---|---|
+  | empty core L* (E1) | 13–33 | 14.8 | 29.3 ✓ | 33.2 ✗ | 31.7 ✓ |
+  | empty lit floor L* (E2) | 41–65 | 21.3 | 37.3 ✗ | 41.2 ✓ | 39.6 ✗ |
+  | empty b* (E3) | 13–18 | 7.4 | 20.5 ✗ | 19.2 ✗ | 15.0 ✓ |
+  | uncapped mouth L* (U1, ±3 of v1) | 43.4–48.0 | 20.4 | 28.7 ✗ | 30.8 ✗ | 28.9 ✗ |
+  | uncapped mouth b* (U2, ±3 of v1) | 11.3–15.0 | 5.5 | 13.1 ✗ | 12.9 ✗ | 11.1 ✗ |
+  | uncapped lit floor L* (U3) | — | 75.5 | 75.5 ✓ | 75.1 ✓ | 75.2 ✓ |
+
+  Floor per try (value × blue): 1.0/1.0 → ×1.1872/×1.15 → ×0.9281/×1.15. Findings, not acted on: (1) E1–E3 never held
+  together; the rendered hole is flatter than real (lit floor − core ≈ 8 L*). (2) U1/U2 are coupled to E2: an
+  uncapped vial's mouth looks through the open vial onto the same floor, so a brighter floor lifts it too; the moves
+  went **toward** the real uncapped range, but D040's "no worse" is ±3 of v1 either way. Any new try = Noor's OK + new
+  decision + new spend. **Arm A stays v1** (no v2 exists); live inspector stays the rule baseline.
+  Cost: start 16:55:37 UTC, stop issued 17:02:11, STOPPED by 17:08:37 ≈ 7–13 min ≈ $0.48–0.95 (console has the billed
+  figure); stopped, not deleted. Files (gitignored): `results/train_v2_check/`; tar `~/Downloads/isaac_train_v2/check_only/`
+  (sha256 `2f328206…`, matched both ends).
 - **1920×1080 frames (D039, Oct 23, `2504904`).** CSI's 1080 still of the empty Good fixture
   (`results/csi_1080/csi_1080_empty_G.jpg`, sha256 `673a76a6…`, not in git) is the cap_seal view at a higher
   resolution: the 640×480 frames are its centre 4:3 part scaled by ~1/2.25.
@@ -248,7 +268,7 @@ YAAD team code).
 - Dataset 1 organizer release (1920×1080) not on the Mac yet (link in Slack `#dataset-1-vial-inspection`):
   development and evaluation only. Its labeler view sits +3.6° from the twin, unlike CSI's still (+0.4°).
 
-## NEXT ACTION (from Fri Oct 23 night) — CSI question, v2 attempt, freeze + package, Monday
+## NEXT ACTION (from Sat Oct 24) — CSI question, v2 outcome, freeze + package, Monday
 **Branch `feat/live-runtime`** (local only). `git status -sb` → `## feat/live-runtime` + ` M twin_to_line/dose_sets.py`.
 
 **State (Oct 23 night):**
@@ -263,11 +283,8 @@ YAAD team code).
    > Hi Shamar, for Monday: when the camera saves an image, which folder on the GB10 does it land in, and is it the
    > 1920×1080 image (a new file each time, or one file that gets overwritten)? Can we copy one 250 MB folder from a
    > USB stick onto the GB10 before 12:30, and is there a screen where we can open an image? Thanks, Noor
-2. **Saturday: v2 attempt (offline arm A only).** Target the two G3 failure modes on the render side (real empty
-   holes read as uncapped vials, mostly the lighter top-row interiors; real seated caps read as crooked); compare
-   real and synthetic crops first (development on DEV runs 1–3 is allowed, D033). The render camera stays the
-   640×480 CapSealCam (D039 brings 1080 frames into that grid). **Ask Noor before starting a Brev instance (~$7).**
-   Record v2 as a new decision before its G3; run G3 once (`g3_check.py --model-dir results/train/resnet18_v2`).
+2. **v2 attempt: done Oct 24, check render failed (no batch; see Status).** Arm A = v1. Open for Noor: drop v2 and go
+   to the freeze, or a new decision for another try (U rule coupled to the floor; E1–E3 never held together).
 3. **Sunday by 9 pm: freeze** (plan step 9): freeze record + hashes, tag locally. Then **rebuild the package from the
    freeze commit** (`../.venv/bin/python gb10/build_package.py`) and dry-run it on the Spark in a fresh folder:
    bootstrap → `PREFLIGHT OK`; DEV run 1 replay identical to the Mac; folder mode with the still. Copy the tar and its
@@ -278,7 +295,8 @@ YAAD team code).
 
 ## Milestones (proposed) — revised Oct 23
 Oct 22 GPU gate run 1 · Oct 23 gate run 2 (closed, D037), training renders, ResNet-18 v1, G3 NO-GO, live runtime,
-1080 frames (D039), GB10 package + Spark rehearsal (done) · Oct 24 v2 attempt, CSI's answer · Oct 25 **freeze by 9 pm**,
+1080 frames (D039), GB10 package + Spark rehearsal (done) · Oct 24 v2 attempt (check render failed, no batch), CSI's
+answer · Oct 25 **freeze by 9 pm**,
 package rebuilt from the freeze commit, dry run on the Spark ·
 **Mon Oct 26 12:30–2 pm CSI visit (confirmed; Noor + Tony): staged sealed test + live run on CSI's GB10** · Oct 26–27
 adjudicate labels, score every arm once · Oct 28–29 backup slot if needed (unconfirmed); error analysis; business case
@@ -347,8 +365,9 @@ validation. `labels/dev_labels.csv` = DRAFT labels.
   authorized an instance.
   - `cc-isaac-gate` (g6e.4xlarge L40S, $3.65/hr) shows FAILURE: it could not restart Oct 23 (no capacity in its
     region); left untouched.
-  - `cc-isaac-gate-2` (Mumbai ap-south-1, g6e.4xlarge L40S, **$4.38/hr**) is **stopped** after the `train_v1`
-    render (Oct 23, ~20:40 UTC).
+  - `cc-isaac-gate-2` (Mumbai ap-south-1, g6e.4xlarge L40S, **$4.38/hr**) is **stopped** after the v2 check render
+    (Oct 24, STOPPED 17:08 UTC). `brev start` worked from the CLI (~1 min); ssh lands on the host, Isaac runs in the
+    `vscode` container (`docker exec vscode …`). On Oct 24 `brev list` showed only this instance (`cc-isaac-gate` gone).
   - Create instances from the console (CLI launch fails). Stop instances whenever idle. No personal spending (D010).
 - Dan Schneider's Oct 16 Brev org for Noor (as Ignite captain, $500): relation to `UWM/MSOE-Team-25` not confirmed —
   don't spend from two orgs without Noor saying so.
@@ -403,8 +422,8 @@ ssh yt-codecrusaders6286@172.30.102.94           # YAAD Spark; FortiClient VPN c
   user rights, USB mounting and a screen there are unknown. Freeze: Sun Oct 25, 9 pm.
 - **No real 1080 frame with caps yet** (D039): only the empty still and 1080 copies of DEV frames. The 320×240 stream
   is not supported (`wrong_size`).
-- **The ResNet doesn't transfer (G3 NO-GO).** The training set was rendered with the 640×480 camera; v2 is a Saturday
-  attempt, offline arm only.
+- **The ResNet doesn't transfer (G3 NO-GO).** The training set was rendered with the 640×480 camera; the v2 attempt
+  (D040) stopped at its check render, so v1 is the only model arm.
 - Isaac/launchable version may differ from 6.0 (recorded, not a reason to change the kit); Isaac in Docker → run inside
   it with `ISAAC_PY=…`; Drive download on the instance may fail → `brev copy` the twin zip.
 - Renders: `render_batch.py` (one Isaac session, 7.1 s/scene for `train_v1`); `render_keep.py` restarts Isaac per scene.

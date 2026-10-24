@@ -13,17 +13,21 @@ Per crop, in the runtime crop geometry:
   hole_*   CIELAB L*, a*, b* in a disk of HOLE_R px at the expected empty-hole opening; hole_Lrel = hole L* / plate L*
            (plate = 90th-percentile L* of the crop)
   mouth_*  the same at the expected open-vial mouth (where an uncapped vial shows its liquid)
+  hole_grad, hole_Lstd, hole_Lp90  structure inside the hole (disk HOLE_IN px): mean |gradient| of L*, spread of L*,
+           and the lit part of the floor (90th percentile L*)
   cap_*    the yellow blob (registration HSV range) nearest the expected seated-cap centre: L*, a*, b*, area (px),
            centroid offset from the expected centre (px), elongation (major / minor axis), specular share (near-white
-           pixels inside the blob's hull)
+           pixels inside the blob's hull); cap_grad / cap_Lstd = structure inside the hull eroded by 2 px (rim, ring,
+           highlight)
   sharp    high-frequency ratio std(g - G1(g)) / std(g) on grey; sharp64 the same on the 64-px model input
   noise    std(g - G1.5(g)) on flat plate pixels (8-bit grey)
   chroma   high-frequency ratio of b* divided by that of L* (low = colour edges blurred, e.g. 4:2:0 subsampling)
   block    (full frames only) 8x8 blockiness around the fixture: mean |step| across the 8-px grid / elsewhere
 Diagnostic probes (development on DEV, D033; never used for a threshold): v1 scores on real crops after one controlled
-change each, to rank which measured difference drives each failure.
+change each (brightness, structure, position, sharpness), to rank which measured difference drives each failure.
+--twin DIR also prints the twin mesh and material under the G01 hole (read-only, needs usd-core).
 
-    python v2_analysis.py [--out results/v2_analysis] [--no-probes]
+    python v2_analysis.py [--out results/v2_analysis] [--no-probes] [--twin DIR]
 """
 import argparse, csv, json, os
 from collections import defaultdict
@@ -39,7 +43,7 @@ TRAIN = [os.path.join(HERE, "results", "train_v1", d) for d in ("data_train", "d
 G3 = os.path.join(HERE, "results", "g3", "resnet18_v1")
 LABELS = os.path.join(HERE, "labels", "dev_labels.csv")
 OUT = os.path.join(HERE, "results", "v2_analysis")
-HOLE_R, CAP_R, BLOB_R = 6, 11, 16
+HOLE_R, HOLE_IN, CAP_R, BLOB_R = 6, 8, 11, 16
 TOP_ROW = {f"G{i:02d}" for i in range(1, 31, 5)}            # G01 G06 ... G26: the row nearest the robot
 SIGMAS = (0.0, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
 
@@ -75,9 +79,16 @@ def cap_blob(img, c):
     return np.array([xs.mean(), ys.mean()]), int(len(xs)), float(np.sqrt(ev[1] / max(ev[0], 1e-6))), hull.astype(bool)
 
 
+def grad(ch):
+    ch = ch.astype(np.float32)
+    return np.hypot(cv2.Sobel(ch, cv2.CV_32F, 1, 0, ksize=3), cv2.Sobel(ch, cv2.CV_32F, 0, 1, ksize=3)) / 8
+
+
 def features(img, geo):
-    L = lab(img); g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    L = lab(img); g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32); gL = grad(L[..., 0])
     plate = float(np.percentile(L[..., 0], 90)); f = {"plate_L": round(plate, 2)}
+    m = disk(g.shape, geo["hole"], HOLE_IN)
+    f.update({"hole_grad": float(gL[m].mean()), "hole_Lstd": float(L[..., 0][m].std()), "hole_Lp90": float(np.percentile(L[..., 0][m], 90))})
     for k in ("hole", "mouth"):
         v = L[disk(g.shape, geo[k], HOLE_R)]
         f.update({f"{k}_L": float(v[:, 0].mean()), f"{k}_a": float(v[:, 1].mean()), f"{k}_b": float(v[:, 2].mean()),
@@ -89,6 +100,9 @@ def features(img, geo):
                   "cap_area": area, "cap_off": float(np.hypot(*(cen - geo["cap"]))), "cap_dx": float(cen[0] - geo["cap"][0]),
                   "cap_dy": float(cen[1] - geo["cap"][1]), "cap_elong": elong,
                   "cap_spec": float(((inside[:, 0] > 92) & (inside[:, 2] < 35)).mean())})
+        core = cv2.erode(hull.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+        if core.sum() > 20:
+            f.update({"cap_grad": float(gL[core].mean()), "cap_Lstd": float(L[..., 0][core].std())})
     flat = (L[..., 0] > plate - 8) & (cv2.Sobel(g, cv2.CV_32F, 1, 0) ** 2 + cv2.Sobel(g, cv2.CV_32F, 0, 1) ** 2 < 400)
     flat = cv2.erode(flat.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
     f["noise"] = float(np.std((g - cv2.GaussianBlur(g, (0, 0), 1.5))[flat])) if flat.sum() > 30 else None
@@ -178,7 +192,20 @@ def sheet(rows, path, title, scale=4):
     cv2.imwrite(path, canvas)
 
 
-def probes(real_a, real_b, syn_hole_L, out):
+def lab_stats(imgs):
+    """Median over crops of each crop's whole-crop L*a*b* mean and std."""
+    v = np.array([[*lab(im).reshape(-1, 3).mean(0), *lab(im).reshape(-1, 3).std(0)] for im in imgs])
+    return np.median(v[:, :3], 0), np.median(v[:, 3:], 0)
+
+
+def transfer(im, target):
+    """Whole-crop colour statistics moved to target (mean, std per L*a*b* channel); local structure kept."""
+    L = lab(im); m, sd = L.reshape(-1, 3).mean(0), L.reshape(-1, 3).std(0) + 1e-6
+    L = (L - m) / sd * target[1] + target[0]; L[..., 0] *= 255 / 100; L[..., 1:] += 128
+    return cv2.cvtColor(np.clip(L, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
+
+
+def probes(real_a, real_b, syn_hole_L, out, target_a=None, target_b=None):
     """v1 scores on real crops after one controlled change each (diagnostic, DEV development only)."""
     from resnet_inspector import ResNetInspector
     insp = ResNetInspector(); torch = insp.torch
@@ -195,8 +222,17 @@ def probes(real_a, real_b, syn_hole_L, out):
             L = lab(im); m = disk(im.shape, geo["hole"], HOLE_R + 2); cur = L[..., 0][disk(im.shape, geo["hole"], HOLE_R)].mean()
             L[..., 0][m] *= syn_hole_L / max(cur, 1e-3); L[..., 1:] += 128; L[..., 0] *= 255 / 100
             return cv2.cvtColor(np.clip(L, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
+        def smooth_in(im, m, sigma=2.5):                     # structure removed inside m, mean colour kept
+            b = cv2.GaussianBlur(im, (0, 0), sigma); out = im.copy(); out[m] = b[m]
+            return out
+        hole_mask = lambda im, g: disk(im.shape, g["hole"], HOLE_IN)
         for name, fn in (("hole interior darkened to the synthetic median L*", lambda im, g: darken(im, g)),
-                         ("sharpened (unsharp mask, sigma 1, amount 1)", lambda im, g: cv2.addWeighted(im, 2.0, cv2.GaussianBlur(im, (0, 0), 1), -1.0, 0))):
+                         ("hole interior smoothed (structure removed, brightness kept)", lambda im, g: smooth_in(im, hole_mask(im, g))),
+                         ("hole interior smoothed and darkened", lambda im, g: darken(smooth_in(im, hole_mask(im, g)), g)),
+                         ("whole hole incl. rim and inner wall (r 10) smoothed and darkened",
+                          lambda im, g: darken(smooth_in(im, disk(im.shape, g["hole"], 10), 4.0), g)),
+                         ("sharpened (unsharp mask, sigma 1, amount 1)", lambda im, g: cv2.addWeighted(im, 2.0, cv2.GaussianBlur(im, (0, 0), 1), -1.0, 0)),
+                         ("whole-crop colour statistics moved to synthetic+aug empty", lambda im, g: transfer(im, target_a))):
             p = score([fn(im, g) for im, g in real_a])
             res[f"(a) {name}"] = {"n": len(imgs), "read_missing_cap_before": int((base.argmax(1) == 1).sum()),
                                   "read_missing_cap_after": int((p.argmax(1) == 1).sum()),
@@ -207,8 +243,17 @@ def probes(real_a, real_b, syn_hole_L, out):
         def recentre(im, geo, off):                           # move the cap blob onto the expected centre
             M = np.float32([[1, 0, -off[0]], [0, 1, -off[1]]])
             return cv2.warpAffine(im, M, im.shape[1::-1], borderMode=cv2.BORDER_REPLICATE)
+        def smooth_cap(im, g, o):                            # rim / ring / highlight structure removed inside the cap
+            b = cap_blob(im, g["cap"])
+            if b is None:
+                return im
+            core = cv2.erode(b[3].astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+            out = im.copy(); out[core] = cv2.GaussianBlur(im, (0, 0), 2.5)[core]
+            return out
         for name, fn in (("cap re-centred on the expected seat", lambda im, g, o: recentre(im, g, o)),
-                         ("sharpened (unsharp mask, sigma 1, amount 1)", lambda im, g, o: cv2.addWeighted(im, 2.0, cv2.GaussianBlur(im, (0, 0), 1), -1.0, 0))):
+                         ("cap interior smoothed (rim, ring, highlight removed)", lambda im, g, o: smooth_cap(im, g, o)),
+                         ("sharpened (unsharp mask, sigma 1, amount 1)", lambda im, g, o: cv2.addWeighted(im, 2.0, cv2.GaussianBlur(im, (0, 0), 1), -1.0, 0)),
+                         ("whole-crop colour statistics moved to synthetic+aug seated", lambda im, g, o: transfer(im, target_b))):
             p = score([fn(im, g, o) for im, g, o in real_b])
             res[f"(b) {name}"] = {"n": len(imgs), "median_defect_before": round(float(np.median(base[:, 1] + base[:, 2])), 3),
                                   "median_defect_after": round(float(np.median(p[:, 1] + p[:, 2])), 3),
@@ -217,10 +262,32 @@ def probes(real_a, real_b, syn_hole_L, out):
     return res
 
 
+def twin_hole_floor(twin):
+    """Read-only: the meshes under the G01 hole (tube base to plate top) and their bound material's diffuseColor."""
+    from pxr import Usd, UsdGeom, UsdShade
+    import twin_positions
+    station = os.path.join(twin, "stations", "tray_inspection", "tray_inspection.usdc")
+    st, anch = Usd.Stage.Open(station), twin_positions.load(station)
+    base = np.array(anch["G01"]["tube_base"]); top = float(np.mean(np.array(anch["tray_good_top"])[:, 2]))
+    bc = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default", "render"])
+    print(f"G01: tube base z {base[2]:.4f} m, plate top z {top:.4f} m")
+    for p in st.Traverse():
+        if not p.IsA(UsdGeom.Mesh):
+            continue
+        r = bc.ComputeWorldBound(p).ComputeAlignedRange(); lo, hi = np.array(r.GetMin()), np.array(r.GetMax())
+        if lo[0] <= base[0] <= hi[0] and lo[1] <= base[1] <= hi[1] and lo[2] <= top + 0.01 and hi[2] >= base[2] - 0.05 and hi[2] - lo[2] < 1:
+            mat = UsdShade.MaterialBindingAPI(p).ComputeBoundMaterial()[0]
+            col = next((UsdShade.Shader(c).GetInput("diffuseColor").Get() for c in (mat.GetPrim().GetChildren() if mat else [])
+                        if UsdShade.Shader(c) and UsdShade.Shader(c).GetInput("diffuseColor")), None)
+            print(f"  {p.GetPath()}  z {lo[2]:.4f}..{hi[2]:.4f}  material {mat.GetPath() if mat else None}  diffuse {col}")
+
+
 def main():
     ap = argparse.ArgumentParser(description="v2 preparation: G3 failure modes, real vs train_v1 synthetic crops")
-    ap.add_argument("--out", default=OUT); ap.add_argument("--no-probes", action="store_true")
+    ap.add_argument("--out", default=OUT); ap.add_argument("--no-probes", action="store_true"); ap.add_argument("--twin")
     a = ap.parse_args(); os.makedirs(a.out, exist_ok=True)
+    if a.twin:
+        twin_hole_floor(a.twin)
     real, block = real_crops()
     rf = []
     for k, im, geo, row in real:
@@ -238,8 +305,8 @@ def main():
                 "lean": r["lean_deg"], "offset_mm": r["offset_mm"], "tilt": r["tilt_deg"], "top": r["position"] in TOP_ROW, "file": path}
         sf.append({**base, "src": "synthetic", **features(im, geo)}); sf.append({**base, "src": "synthetic+aug", **features(ai, geo)})
         simg[path] = (im, ai, geo)
-    keys_hole = ["hole_L", "hole_a", "hole_b", "hole_Lrel", "mouth_L", "mouth_a", "mouth_b", "plate_L", "sharp", "sharp64", "noise", "chroma"]
-    keys_cap = ["cap_L", "cap_a", "cap_b", "cap_area", "cap_off", "cap_dx", "cap_dy", "cap_elong", "cap_spec", "sharp", "sharp64", "noise", "chroma"]
+    keys_hole = ["hole_L", "hole_a", "hole_b", "hole_Lrel", "hole_grad", "hole_Lstd", "hole_Lp90", "mouth_L", "mouth_a", "mouth_b", "plate_L", "sharp", "sharp64", "noise", "chroma"]
+    keys_cap = ["cap_L", "cap_a", "cap_b", "cap_area", "cap_off", "cap_dx", "cap_dy", "cap_elong", "cap_spec", "cap_grad", "cap_Lstd", "sharp", "sharp64", "noise", "chroma"]
     ea = [r for r in rf if r["gt"] == "no_vial"]
     res = {"real_observations": len(rf), "block_real_by_run": block,
            "block_synthetic_renders": float(np.median([blockiness(cv2.cvtColor(cv2.imread(os.path.join(TRAIN[0], "renders", f)), cv2.COLOR_BGR2GRAY))
@@ -319,7 +386,13 @@ def main():
         syn_hole_L = res["mode_a"]["synthetic empty"]["hole_L"]["median"]
         pa = [rimg[(r["frame"], r["position"])] for r in ea if r["pred"] == "missing_cap"]
         pbb = [(*rimg[(r["frame"], r["position"])], np.array([r["cap_dx"], r["cap_dy"]])) for r in pb if r["defect"] >= 0.5 and r.get("cap_dx") is not None]
-        res["probes"] = probes(pa, pbb, syn_hole_L, a.out)
+        ta = lab_stats([simg[r["file"]][1] for r in groups_a["synthetic empty"]][:600])
+        tb = lab_stats([simg[r["file"]][1] for r in groups_b["synthetic pass seated"]][:600])
+        res["probes"] = probes(pa, pbb, syn_hole_L, a.out, ta, tb)
+        res["probe_targets"] = {"synthetic+aug empty": [np.round(t, 2).tolist() for t in ta],
+                                "synthetic+aug seated": [np.round(t, 2).tolist() for t in tb],
+                                "real empty misread": [np.round(t, 2).tolist() for t in lab_stats([im for im, _ in pa])],
+                                "real seated, defect >= 0.5": [np.round(t, 2).tolist() for t in lab_stats([im for im, _, _ in pbb])]}
         json.dump(res, open(os.path.join(a.out, "measurements.json"), "w"), indent=1)
     print(json.dumps(res, indent=1)[:200] + " ...")
     print(f"-> {a.out}/measurements.json, real_features.csv, sheet_a_empty_holes.png, sheet_b_seated_caps.png" + ("" if a.no_probes else ", probes.json"))

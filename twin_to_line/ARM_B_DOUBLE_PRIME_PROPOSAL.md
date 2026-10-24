@@ -1,6 +1,6 @@
-# Proposed arm B″: non-defect DEV observations only — approval required
+# Arm B″: approved non-defect DEV observation procedure (D041)
 
-**Proposal only. Not fitted, not evaluated, no threshold file created.** This is a new DEV-fit reference arm,
+**Approved by Noor on 2026-10-24, before fitting or G3; recorded in D041.** This is a new DEV-fit reference arm,
 not a synthetic-only arm and not independent evidence. D033's organizer-permission question still applies.
 Approval must precede both fitting and G3. Existing arms, operating points, and live inspector stay unchanged.
 
@@ -28,7 +28,8 @@ Approval must precede both fitting and G3. Existing arms, operating points, and 
    `results/g3/rule_dev_good_only/` directory. Same LIVE_FILL pipeline, no tracker, same recall ≥0.90 / FPR ≤0.05
    criteria. Report all classes, misses, false positives, escalation, and exact-class recall alongside A/B/B′.
    This reuses DEV examples for fitting and evaluation: label it an **in-sample development reference**. No retuning,
-   no replacing the live inspector, and no added sealed-set scoring without a separately approved freeze update.
+   no replacing the live inspector. Noor also approved B″ for one sealed-set score next to A, B and B′ (D041);
+   the Sunday freeze record must include it.
 
-Approval requested for this exact procedure and the single subsequent G3 run. No calculations of B″ thresholds
-or B″ G3 will run before that approval.
+The exact procedure and single subsequent G3 run are approved. Fitting and G3 must follow the D041 commit;
+no retuning is authorized. The organizer-permission question remains open.

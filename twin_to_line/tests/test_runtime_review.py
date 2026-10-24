@@ -126,7 +126,7 @@ def test_02_replacement_preserving_mtime_and_size_is_new(tmp_path):
     assert L.file_version(str(f)) != before
 
 
-def test_03_watch_uses_seen_time_replay_keeps_filename_time(tmp_path, monkeypatch):
+def test_03_same_timestamp_rewrites_keep_advancing_replay_keeps_filename_time(tmp_path, monkeypatch):
     incoming = tmp_path / "in"; incoming.mkdir()
     f = incoming / "cap_seal_20261026_123000_000000.png"
     clock = [100.0]
@@ -145,10 +145,11 @@ def test_03_watch_uses_seen_time_replay_keeps_filename_time(tmp_path, monkeypatc
             rows.append(s.process_frame(*item))
     finally:
         frames.close(); s.close()
-    assert [r["frame_t"] for r in rows] == [100., 102., 104., 106.]
+    named = L.frame_time(str(f))
+    assert [r["frame_t"] for r in rows] == [named, named + 2, named + 4, named + 6]
     assert [r["status"] for r in rows] == ["settling", "settling", "scored", "unchanged"]
     assert len(next(L.replay(str(incoming)))) == 2
-    assert L.frame_time(str(f)) != 106.
+    assert L.frame_time(str(f)) == named
 
 
 def test_04_ffmpeg_open_and_read_deadlines_are_requested():

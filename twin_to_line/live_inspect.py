@@ -19,7 +19,8 @@ Sources (one code path after decoding: Session.process_frame):
               10 s watchdog detects stalls. Unbounded backends/devices require folder/stills fallback.
               A video file gives one frame per --every s of its own
               timestamps (real_data.iter_video: the same frames as --export-replay), as fast as it decodes
-Frame time: folder sessions use monotonic time when each validated version was seen; replay uses a video frame id
+Frame time: folder sessions prefer increasing filename time, otherwise elapsed arrival time on the same clock;
+replay uses a video frame id
 (cap_seal_video_1.mp4@t0612.0.png) or a CSI still name
 (cap_seal_20260922_192843_993721.jpg); otherwise the file's modification time.
 Frame size (the 'path' column of the trial log):
@@ -131,7 +132,8 @@ def frame_id(path):
     return name[:-4] if R.VIDEO_RE.match(name) and name.endswith(".png") else name
 
 
-def frame_time(path):
+def filename_time(path):
+    """Parsed capture time, or None when the name carries no timestamp (never use mtime for live arrivals)."""
     name = os.path.basename(path)
     m = R.VIDEO_RE.match(name)
     if m:
@@ -139,7 +141,28 @@ def frame_time(path):
     m = STILL_RE.search(name)
     if m:
         return datetime.strptime("".join(m.groups()), "%Y%m%d%H%M%S%f").replace(tzinfo=timezone.utc).timestamp()
-    return os.path.getmtime(path)
+    return None
+
+
+def frame_time(path):
+    t = filename_time(path)
+    return os.path.getmtime(path) if t is None else t
+
+
+class FolderClock:
+    """Prefer forward filename time. Otherwise advance by elapsed arrival time in the previous frame's timebase."""
+    def __init__(self):
+        self.previous = self.arrival = None
+
+    def time(self, path, arrival):
+        try:
+            t = filename_time(path)
+        except ValueError:                         # malformed date/time: use arrival, not a per-frame error
+            t = None
+        if t is None or (self.previous is not None and t <= self.previous):
+            t = arrival if self.previous is None else self.previous + max(0., arrival - self.arrival)
+        self.previous, self.arrival = t, arrival
+        return t
 
 
 def dataset_index():
@@ -177,7 +200,7 @@ def complete(path):
         return False
     if path.lower().endswith(".png"):
         return tail.endswith(b"IEND\xaeB`\x82")
-    return tail.rstrip(b"\x00").endswith(b"\xff\xd9")
+    return tail.endswith(b"\xff\xd9")
 
 
 def replay(folder, ix=None):
@@ -205,9 +228,13 @@ def read_version(path, version=None):
             data = f.read()
         unchanged = file_version(path) == version
     except OSError:
-        return None, False, False
+        try:
+            unchanged = version is not None and file_version(path) == version
+        except OSError:
+            unchanged = False
+        return None, False, unchanged
     finished = (data.endswith(b"IEND\xaeB`\x82") if path.lower().endswith(".png")
-                else data.rstrip(b"\x00").endswith(b"\xff\xd9"))
+                else data.endswith(b"\xff\xd9"))
     img = None
     if unchanged and finished:
         try:
@@ -218,8 +245,9 @@ def read_version(path, version=None):
 
 
 def watch(folder, poll=0.25, idle_exit=None, give_up_s=3.0, skip=None, stats=None, ix=None):
-    """(path, image, monotonic seen time) for each version unchanged during its read and complete;
-    an incomplete version is logged unreadable after give_up_s. Replacements under the same name are read again.
+    """(path, image, time) for each acceptable version: advancing filename time, otherwise elapsed arrival time.
+    An unacceptable version (including permission errors) is logged unreadable once after give_up_s.
+    Replacements under the same name are read again.
     Runs until Ctrl-C, or until nothing new has arrived for idle_exit seconds.
     Images already in the folder when watch() is called are not read unless they are written again (CSI's camera
     folder still holds the staged test images); skip = the names to ignore instead (() reads everything)."""
@@ -241,6 +269,7 @@ def watch(folder, poll=0.25, idle_exit=None, give_up_s=3.0, skip=None, stats=Non
 def _watch(folder, poll, idle_exit, give_up_s, seen, stats, ix, initial_error=None):
     """seen: {name: version} of what was read (or ignored at start); pending: {name: (version, first seen)}."""
     pending, last = {}, time.monotonic()
+    clock = FolderClock()
     failed = False
     if initial_error:
         print(f"WARNING folder {folder}: {initial_error}; retrying in {poll:g} s", flush=True)
@@ -276,21 +305,25 @@ def _watch(folder, poll, idle_exit, give_up_s, seen, stats, ix, initial_error=No
             if not is_image(n):
                 continue
             p = os.path.join(folder, n)
+            stat_failed = False
             try:
                 v = file_version(p)
-            except OSError:
+            except FileNotFoundError:
                 continue
+            except OSError as e:
+                v, stat_failed = ("unavailable", type(e).__name__), True
             if seen.get(n) == v:
                 continue
             now = time.monotonic()
             if n not in pending or pending[n][0] != v:
                 pending[n] = (v, now)
-            img, finished, unchanged = (None, True, True) if refusal(ix, p) else read_version(p, v)
+            refused = refusal(ix, p)
+            img, finished, unchanged = ((None, False, True) if stat_failed or refused else read_version(p, v))
             if not unchanged:                           # rewritten while being read: take the next version instead
                 pending.pop(n, None); continue
-            if finished or now - pending[n][1] >= give_up_s:
+            if refused or (finished and img is not None) or now - pending[n][1] >= give_up_s:
                 seen[n] = v; del pending[n]; last = now
-                yield p, img, now
+                yield p, img if finished and unchanged else None, clock.time(p, now)
         if idle_exit is not None and time.monotonic() - last > idle_exit:
             return
         time.sleep(poll)

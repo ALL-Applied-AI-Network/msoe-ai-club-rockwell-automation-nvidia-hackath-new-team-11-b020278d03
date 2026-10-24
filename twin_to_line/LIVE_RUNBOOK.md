@@ -74,9 +74,10 @@ never writes into the image folder (R10).
    - No status `wrong_size`. Column 77 (`path`) is `1080->640` for 1920×1080 frames (warped into the DEV grid with
      `frame_warp_1080.json`, D039) or `640` for 640×480 frames. Any other size (e.g. the 320×240 stream) is
      `wrong_size`: see §4.
-   - Column 7 (`frame_t`) is monotonic time when the validated file version was seen, in seconds
-     (`cut -d, -f6,7 "$OUT/trial_log.csv"`). Folder mode uses this one clock regardless of filenames or mtimes;
-     replay keeps filename timestamps.
+   - Column 7 (`frame_t`) prefers time parsed from the filename when it is later than the previous frame's.
+     Otherwise it advances by elapsed arrival time since the previous frame, keeping the same timebase
+     (`cut -d, -f6,7 "$OUT/trial_log.csv"`). Repeated names still advance; timestamped bursts retain capture intervals.
+     With no initial timestamp it starts from monotonic arrival time. Replay keeps filename timestamps.
    - Images already in `IN` when you start are ignored (the start line says how many); only images that arrive
      after the start are read, in arrival order.
 
@@ -122,14 +123,14 @@ never writes into the image folder (R10).
 | `FileNotFoundError: ... results/train/resnet18_v1/run.json` (`--inspector resnet`; no `OUT` created) | The model folder isn't on this Mac (gitignored) | Copy it back from the backup and check its hashes against the freeze record; or run `--inspector rule` |
 | `ValueError: ... model.pt does not match the sha256 recorded in run.json` | The model file was changed or damaged | Don't run the ResNet; restore the folder from the backup |
 | `ModuleNotFoundError: No module named 'torch'` | `.venv` lacks torch | `../.venv/bin/pip install torch torchvision` before the session (not on the day); or run `--inspector rule` |
-| Status `unreadable` | The image can't be decoded (corrupt, or still incomplete after 3 s) | One-off: note it, keep going. Every image: the copy route is broken → Ctrl-C, check with CSI |
+| Status `unreadable` | A version remains unacceptable after 3 s: permission denied, corrupt image, empty/incomplete file, missing JPEG/PNG end marker, or extra bytes after the end marker (including zero padding) | Logged once per version and never scored; a later complete version is accepted. One-off: note it. Repeated: Ctrl-C, check permissions and the copy route with CSI |
 | Status `wrong_size`, note e.g. `320x240, expected 640x480 or 1920x1080` | The images are neither 1920×1080 nor 640×480 (e.g. the 320×240 stream) | Ctrl-C. Ask CSI for the 1920×1080 images. Never resize or crop by hand |
 | `FileNotFoundError: ... frame_warp_1080.json` at startup | The required warp file is missing; startup stops while hashing runtime files | Restore the frozen package and check its hashes (§0.1 or §7) before restarting |
 | `WARNING folder ...`, status `source_error` | The watched directory cannot be listed (e.g. disconnected mount or permissions) | The runtime retries every `--poll` seconds and logs `source_recovered` on recovery; restore access. If `--idle-exit` ends during the outage, `session.json` records the source error |
 | Status `refused` | A dataset holdout frame (runs 4–5) arrived in the folder | Ctrl-C; take that folder out of use; tell Noor |
 | Status `error` (the note has the message) | One frame failed; the program keeps going | One-off: note it. Repeated: Ctrl-C, start again with a new `OUT`, log it as an intervention |
 | A new image is in `IN` but no trial-log line appears | It isn't `.png` / `.jpg` / `.jpeg`, or its name starts with `.` (ignored) | `ls -la "$IN"`; ask CSI for the file type |
-| Trial-log lines keep coming but no event for minutes | The arm stays over the fixture, or successive observed images never show the same setup for 4 s | Check `arm` / `settling`; for independent stills saved on request, restart with `--gate each` (§7.5) |
+| Trial-log lines keep coming but no event for minutes | The arm stays over the fixture, the scene never holds still for 4 s, or `frame_t` barely advances (e.g. a burst with missing, invalid or repeated filename timestamps) | Check `arm` / `settling` and column 7. If `frame_t` is flat, stop and tell Noor (§6); for independent stills saved on request, restart with `--gate each` (§7.5) |
 | Boxes on the overlay don't sit on the holes; many holes UNSURE or WAITING that look filled | The camera view differs from the position map | Ctrl-C; take one photo of the screen; tell Noor. Never re-aim or move the camera (CSI rule) |
 | The program crashed, or the terminal closed | — | Start again with a **new** `OUT` (§1). Images already in `IN` are ignored by the new session, so images that arrived while it was down are not read. Log the restart and the gap as an intervention |
 
@@ -149,7 +150,8 @@ never writes into the image folder (R10).
 
 ## 6. Open before the freeze
 - CSI: how images reach our process on the GB10 (folder path or stream URL, and capture cadence); a screen for the
-  overlay. Folder mode times validated arrivals; replay uses filename times, falling back to modification times.
+  overlay. Folder mode prefers advancing filename times, otherwise elapsed arrival time; replay uses filename
+  times, falling back to modification times.
 - 1920×1080 is handled by the D039 warp; the 320×240 stream is not supported (`wrong_size`).
 - Operator view: the console grid (primary) and `view.html` (needs a browser on the GB10; checked in Chrome over
   http://127.0.0.1 because the test browser could not open `file://`).
@@ -178,8 +180,11 @@ for the results; printed staging list, label sheet and this section; paper log.
    USB=/media/<user>/<label>
    mkdir -p ~/ttl && cp "$USB"/ttl_gb10_<sha>.tar* ~/ttl/ && cd ~/ttl
    sha256sum -c ttl_gb10_<sha>.tar.sha256        # -> ttl_gb10_<sha>.tar: OK
-   test ! -e ttl_gb10_<sha> || { echo "Use a fresh folder; keep existing results"; exit 1; }
-   tar -xf ttl_gb10_<sha>.tar && cd ttl_gb10_<sha> && bash bootstrap.sh
+   if [ -e "ttl_gb10_<sha>" ]; then
+       echo "Use a fresh folder; keep existing results"
+   else
+       tar -xf "ttl_gb10_<sha>.tar" && cd "ttl_gb10_<sha>" && bash bootstrap.sh
+   fi
    ```
    Expected (Spark, 5 s in total):
    ```

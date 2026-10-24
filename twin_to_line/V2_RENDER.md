@@ -7,7 +7,8 @@ Mac commands run in `~/code/ignite/twin_to_line`; `I=cc-isaac-gate-2`.
 ## 0. The night before (done)
 ```bash
 U=~/Downloads/isaac_train_v2/upload; mkdir -p $U
-git -C ~/code/ignite archive --format=tar.gz -o $U/code_$(git rev-parse --short HEAD).tar.gz HEAD twin_to_line
+S=$(git -C ~/code/ignite rev-parse --short HEAD)
+git -C ~/code/ignite archive --format=tar.gz -o "$U/code_$S.tar.gz" HEAD twin_to_line      # absolute -o: -C changes the cwd
 tar -czf $U/twin_fix2.tar.gz -C ~/Downloads/csi_digital_twin twin_fix2
 (cd $U && shasum -a 256 code_*.tar.gz twin_fix2.tar.gz > upload.sha256 && cat upload.sha256)
 ```

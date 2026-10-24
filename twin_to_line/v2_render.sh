@@ -34,7 +34,7 @@ if [ ! -x "$W/venv/bin/python" ]; then
 fi
 PY=$W/venv/bin/python
 INDICES=$($PY -c "import json; print(','.join(map(str, json.load(open('$C/configs/v2_check.json'))['indices'])))")
-$PY -c "import pxr, numpy, cv2; print('usd', pxr.Usd.GetVersion(), 'numpy', numpy.__version__, 'cv2', cv2.__version__)" | tee -a "$W/v2_render.log"
+$PY -c "from pxr import Usd; import numpy, cv2; print('usd', Usd.GetVersion(), 'numpy', numpy.__version__, 'cv2', cv2.__version__)" | tee -a "$W/v2_render.log"
 (cd "$C" && $PY twin_fix2.py --check "$T1/twin_fix1" "$T1/twin_fix2") | tail -3 | tee -a "$W/v2_render.log"
 (cd "$C" && $PY gen_scenes.py "$T1/twin_fix2" --selftest) | tail -1 | tee -a "$W/v2_render.log"
 

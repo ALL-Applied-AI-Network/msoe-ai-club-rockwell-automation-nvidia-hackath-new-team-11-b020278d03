@@ -55,6 +55,15 @@ class Work2(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertFalse(self.F2.check(self.w1, bad))
 
+    def test_chained_overlay_resolves_the_twin_station_and_selftest_passes(self):
+        import contextlib, shutil
+        tw = self.G.Twin(self.w2)
+        self.assertEqual(tw.base_station_sha256, self.G.Twin(TWIN).station_sha256)
+        self.assertEqual(tw.fix["fix"], "work2")
+        with contextlib.redirect_stdout(io.StringIO()):
+            fails, tmp = self.G.selftest(tw)
+        self.assertEqual(fails, []); shutil.rmtree(tmp, ignore_errors=True)
+
     def test_floor_config_needs_work2(self):
         cfg = json.load(open(os.path.join(P.HERE, "configs", "train_v2.json")))
         with self.assertRaises(self.G.ConfigError):

@@ -167,9 +167,14 @@ class Twin:
         if os.path.isfile(fix_json):                              # overlay twin from twin_fix.py
             self.fix = dict(json.load(open(fix_json)), fix_json_sha256=sha256_file(fix_json))
             base = os.path.normpath(os.path.join(os.path.dirname(self.station), self.layer.subLayerPaths[0]))
-            self.base_station_sha256 = sha256_file(base)
-            if self.base_station_sha256 != self.fix["sha256"]["original_station"]:
+            if sha256_file(base) != self.fix["sha256"]["original_station"]:
                 raise ValueError(f"overlay sublayer {base} is not the station FIX.json was built on")
+            while True:                                           # chained overlays (work2 on work1): the twin's own station
+                lyr = Sdf.Layer.FindOrOpen(base); sub = list(lyr.subLayerPaths)       # keep the layer alive while reading
+                if not sub:
+                    break
+                base = os.path.normpath(os.path.join(os.path.dirname(base), sub[0]))
+            self.base_station_sha256 = sha256_file(base)
             if self.station_sha256 != self.fix["sha256"]["overlay_station"]:
                 raise ValueError(f"{self.station} differs from the overlay recorded in FIX.json")
         st = Usd.Stage.Open(self.layer); xc = UsdGeom.XformCache()

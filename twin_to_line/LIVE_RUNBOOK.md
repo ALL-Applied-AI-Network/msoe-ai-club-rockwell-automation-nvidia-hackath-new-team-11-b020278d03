@@ -74,7 +74,9 @@ never writes into the image folder (R10).
    - No status `wrong_size`. Column 77 (`path`) is `1080->640` for 1920×1080 frames (warped into the DEV grid with
      `frame_warp_1080.json`, D039) or `640` for 640×480 frames. Any other size (e.g. the 320×240 stream) is
      `wrong_size`: see §4.
-   - Column 7 (`frame_t`) increases by the camera's frame interval (`cut -d, -f6,7 "$OUT/trial_log.csv"`).
+   - Column 7 (`frame_t`) is monotonic time when the validated file version was seen, in seconds
+     (`cut -d, -f6,7 "$OUT/trial_log.csv"`). Folder mode uses this one clock regardless of filenames or mtimes;
+     replay keeps filename timestamps.
    - Images already in `IN` when you start are ignored (the start line says how many); only images that arrive
      after the start are read, in arrival order.
 
@@ -122,11 +124,12 @@ never writes into the image folder (R10).
 | `ModuleNotFoundError: No module named 'torch'` | `.venv` lacks torch | `../.venv/bin/pip install torch torchvision` before the session (not on the day); or run `--inspector rule` |
 | Status `unreadable` | The image can't be decoded (corrupt, or still incomplete after 3 s) | One-off: note it, keep going. Every image: the copy route is broken → Ctrl-C, check with CSI |
 | Status `wrong_size`, note e.g. `320x240, expected 640x480 or 1920x1080` | The images are neither 1920×1080 nor 640×480 (e.g. the 320×240 stream) | Ctrl-C. Ask CSI for the 1920×1080 images. Never resize or crop by hand |
-| Status `wrong_size`, note `1920x1080, expected 640x480` (no `or 1920x1080`) | `frame_warp_1080.json` is missing from this copy, so 1080 frames can't be warped | Ctrl-C. Check the version and hashes (§0.1, or the preflight in §7); use the frozen package |
+| `FileNotFoundError: ... frame_warp_1080.json` at startup | The required warp file is missing; startup stops while hashing runtime files | Restore the frozen package and check its hashes (§0.1 or §7) before restarting |
+| `WARNING folder ...`, status `source_error` | The watched directory cannot be listed (e.g. disconnected mount or permissions) | The runtime retries every `--poll` seconds and logs `source_recovered` on recovery; restore access. If `--idle-exit` ends during the outage, `session.json` records the source error |
 | Status `refused` | A dataset holdout frame (runs 4–5) arrived in the folder | Ctrl-C; take that folder out of use; tell Noor |
 | Status `error` (the note has the message) | One frame failed; the program keeps going | One-off: note it. Repeated: Ctrl-C, start again with a new `OUT`, log it as an intervention |
 | A new image is in `IN` but no trial-log line appears | It isn't `.png` / `.jpg` / `.jpeg`, or its name starts with `.` (ignored) | `ls -la "$IN"`; ask CSI for the file type |
-| Trial-log lines keep coming but no event for minutes | The arm stays over the fixture, or the scene never holds still for 4 s; or `frame_t` doesn't increase (files without a timestamp in the name, all copied at once) | Check the statuses (`arm` / `settling`) and column 7; if `frame_t` is flat, stop and tell Noor (§6) |
+| Trial-log lines keep coming but no event for minutes | The arm stays over the fixture, or successive observed images never show the same setup for 4 s | Check `arm` / `settling`; for independent stills saved on request, restart with `--gate each` (§7.5) |
 | Boxes on the overlay don't sit on the holes; many holes UNSURE or WAITING that look filled | The camera view differs from the position map | Ctrl-C; take one photo of the screen; tell Noor. Never re-aim or move the camera (CSI rule) |
 | The program crashed, or the terminal closed | — | Start again with a **new** `OUT` (§1). Images already in `IN` are ignored by the new session, so images that arrived while it was down are not read. Log the restart and the gap as an intervention |
 
@@ -145,8 +148,8 @@ never writes into the image folder (R10).
   over the fixture is logged `arm` and not scored.
 
 ## 6. Open before the freeze
-- CSI: how images reach our process on the GB10 (folder path, which stream, file names with a timestamp or not:
-  the event rule needs a real frame time, otherwise the file's modification time is used); a screen for the overlay.
+- CSI: how images reach our process on the GB10 (folder path or stream URL, and capture cadence); a screen for the
+  overlay. Folder mode times validated arrivals; replay uses filename times, falling back to modification times.
 - 1920×1080 is handled by the D039 warp; the 320×240 stream is not supported (`wrong_size`).
 - Operator view: the console grid (primary) and `view.html` (needs a browser on the GB10; checked in Chrome over
   http://127.0.0.1 because the test browser could not open `file://`).
@@ -175,6 +178,7 @@ for the results; printed staging list, label sheet and this section; paper log.
    USB=/media/<user>/<label>
    mkdir -p ~/ttl && cp "$USB"/ttl_gb10_<sha>.tar* ~/ttl/ && cd ~/ttl
    sha256sum -c ttl_gb10_<sha>.tar.sha256        # -> ttl_gb10_<sha>.tar: OK
+   test ! -e ttl_gb10_<sha> || { echo "Use a fresh folder; keep existing results"; exit 1; }
    tar -xf ttl_gb10_<sha>.tar && cd ttl_gb10_<sha> && bash bootstrap.sh
    ```
    Expected (Spark, 5 s in total):
@@ -201,11 +205,17 @@ for the results; printed staging list, label sheet and this section; paper log.
    Hashes to check by eye: `rule_thresholds.json` 322c29ec…, `frame_warp_1080.json` 9837b298…, `position_map_G.json`
    7ffaf48c…, `registration_dev.json` 6dd0de1b….
    If it stops with `BOOTSTRAP FAILED: ...`:
+   - `results already exist`: bootstrap refuses before cleanup or installation. It never deletes or moves results.
+     Keep that folder; unpack the original tar into a fresh parent folder and run its `bootstrap.sh`. This includes
+     `preflight_out` from an earlier successful or failed preflight. Do not unpack over an existing installation.
    - `SHA256SUMS mismatch`: copy the tar again from the stick.
    - `bundled Python not usable here; trying the system Python`: this line alone is fine if a `python ...` line and `OK`
      follow. `no usable Python`: stop and tell Noor (no install on CSI's machine without CSI's OK).
    - `offline install failed`: only if CSI allows internet on the GB10: `bash bootstrap.sh --online`. Else stop.
    - `preflight`: **don't run.** Note which set says `FAIL`; results on this machine would differ from the Mac.
+   Preflight compares the bundled **still images** only: every state must match and all scores must be finite with
+   score difference exactly **0**. Video decoding is outside preflight's scope. The package also carries a
+   checksummed metadata-only `data_index/image_index.csv` to refuse known protected still filenames without raw data.
    Then, for every later step:
    ```bash
    cd ~/ttl/ttl_gb10_<sha>/code/twin_to_line
@@ -214,7 +224,7 @@ for the results; printed staging list, label sheet and this section; paper log.
 2. **How do frames arrive?** Ask CSI, then pick the row (step 5 uses it). Saved files: `IN=<the folder>`, and check
    one image with `$PY -c "import cv2,sys; print(cv2.imread(sys.argv[1]).shape)" "$IN/<newest file>"` →
    `(1080, 1920, 3)` (or `(480, 640, 3)`; anything else, e.g. `(240, 320, 3)`, is `wrong_size`: ask for 1920×1080).
-   A live stream: `SRC=<the URL or device>`.
+   A live stream: `SRC=<the RTSP or HTTP URL>`. Raw camera devices require the folder/stills fallback below.
 3. **12:30 staging.** Nothing of ours runs during staging. CSI saves one image per staged setup, in the camera
    folder `IN`. Noor and Tony fill the label sheet per setup (image file name ↔ setup).
 4. **Staged images: copy them off, don't run anything on them** (§5). Copy exactly the images on the label sheet:
@@ -235,7 +245,7 @@ for the results; printed staging list, label sheet and this section; paper log.
    | New image files in a folder | `--source folder:"$IN" --out "$OUT"` | `watching <IN>: N image(s) already there are ignored; new images only` |
    | One file rewritten again and again (same name) | the same command | the same; the trial log repeats that file name, one row per new version |
    | A live video stream (RTSP / HTTP URL) — **untested on a live camera** | `--source stream:"$SRC" --every 1.0 --out "$OUT"` | `stream <SRC>: live source, newest frame every 1 s; …`, then `stream <SRC>: connected, 1920x1080` |
-   | A camera device on the GB10 (`0`, `/dev/video0`) — **untested on a live camera** | `--source stream:/dev/video0 --every 1.0 --out "$OUT"` | as for a stream |
+   | A raw camera device on the GB10 (`0`, `/dev/video0`) | Ask CSI to save images; use `--source folder:"$IN" --out "$OUT"` (add `--gate each` for independent stills) | Direct device mode is refused because its reads cannot be bounded |
    | Stills saved only on request (CSI saves one image per fixture state) | `--source folder:"$IN" --gate each --out "$OUT"` | `watching <IN>: …`; then one event line + grid per saved still |
    | Nothing reachable | no live run; staging is unaffected | — |
 
@@ -246,7 +256,11 @@ for the results; printed staging list, label sheet and this section; paper log.
    `tail -f "$OUT/trial_log.csv" | cut -d, -f6,8,77` shows one `<frame>,<status>,<path>` line per frame (folder: within
    ~1 s of the file appearing, Spark 0.3–0.4 s; stream: one per `--every` s, named `stream_<UTC time>`).
    - **Stream drops:** `WARNING stream <SRC>: dropped after N frames; reconnecting in 2 s` (or `cannot open; retrying`)
-     is logged and the stream is reopened; the run never stops by itself. FFmpeg may print its own lines (e.g.
+     is logged and the stream is reopened. FFmpeg open and read calls each request a 5 s timeout. A watchdog prints
+     `WARNING ... no new frame for 10 s` and requests release and reconnect. Release happens after the reader returns,
+     with a further bounded 5.5 s wait. If the backend ignores the deadlines, the source stops and prints the
+     folder/stills fallback; it does not accumulate blocked reader threads. Devices or backends without bounded reads
+     require CSI to save files: `--source folder:"$IN"` (independent stills: add `--gate each`). FFmpeg may print its own lines (e.g.
      `Stream ends prematurely`); they are harmless. If an RTSP stream keeps dropping, try
      `export OPENCV_FFMPEG_CAPTURE_OPTIONS="rtsp_transport;tcp"` before the command. Checked Oct 23 only against a
      local MJPEG-over-HTTP server (connect, event after 4.1 s, drop, reconnect, Ctrl-C) and the DEV run 1 video as a

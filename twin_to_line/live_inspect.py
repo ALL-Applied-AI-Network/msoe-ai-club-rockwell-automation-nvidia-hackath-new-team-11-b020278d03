@@ -10,15 +10,17 @@ fill-sequence state (LIVE_FILL, D021) -> predictions CSV + trial log + operator 
 
 Sources (one code path after decoding: Session.process_frame):
   replay:DIR  every image in DIR in frame-time order, as fast as it runs
-  folder:DIR  watches DIR; a new image is read once its size is unchanged for one poll and its end marker
-              (JPEG FFD9 / PNG IEND) is present, so a half-written file is never read. Images already in DIR at
+  folder:DIR  watches DIR; a new image is decoded only when unchanged during its read and its end marker
+              (JPEG FFD9 / PNG IEND) is present. Incomplete versions are logged unreadable after 3 s. Images already in DIR at
               start are ignored (the camera folder still holds the staged test images); session.json counts them.
               A file written again under the same name (a camera overwriting one file) is read again
-  stream:SRC  cv2.VideoCapture: an RTSP / HTTP URL, a device (0, /dev/video0) or a video file. A live source is read
-              continuously in a thread and its newest frame is passed on every --every s (default 1.0); a drop is
-              logged as a WARNING and reconnected, never fatal. A video file gives one frame per --every s of its own
+  stream:SRC  an RTSP / HTTP URL via FFmpeg with bounded open/read calls, or a video file. A live source is read
+              continuously and its newest frame is passed on every --every s (default 1.0); drops reconnect and a
+              10 s watchdog detects stalls. Unbounded backends/devices require folder/stills fallback.
+              A video file gives one frame per --every s of its own
               timestamps (real_data.iter_video: the same frames as --export-replay), as fast as it decodes
-Frame time: from a video frame id (cap_seal_video_1.mp4@t0612.0.png) or a CSI still name
+Frame time: folder sessions use monotonic time when each validated version was seen; replay uses a video frame id
+(cap_seal_video_1.mp4@t0612.0.png) or a CSI still name
 (cap_seal_20260922_192843_993721.jpg); otherwise the file's modification time.
 Frame size (the 'path' column of the trial log):
   640x480    the DEV cap_seal grid: processed as is ('640')
@@ -141,20 +143,22 @@ def frame_time(path):
 
 
 def dataset_index():
-    try:
-        return R.Index()
-    except OSError:
-        return None                       # no dataset on this machine: nothing to protect
+    # GB10 carries only filename/run metadata, never holdout pixels.
+    for root in (R.REAL_ROOT, os.path.join(P.HERE, "..", "..", "data_index")):
+        try:
+            return R.Index(root)
+        except FileNotFoundError:
+            pass
+    return None
 
 
 def refusal(ix, path):
     """Why a frame must not be processed (dataset frame outside DEV runs 1-3), or None."""
-    if ix is None:
-        return None
     try:
-        run = ix.run_of_source(path)
+        video = R.VIDEO_RE.match(os.path.basename(path))
+        run = video.group(1) if video else ix.run_of_source(path) if ix else None
         if run is not None:
-            R.check_allowed(run, role_map=ix.role_map)
+            R.check_allowed(run, role_map=ix.role_map if ix else None)
     except R.ProtectedDataError as e:
         return str(e)
     return None
@@ -184,37 +188,91 @@ def replay(folder, ix=None):
     if bad:
         raise R.ProtectedDataError(f"{len(bad)} protected frame(s) in {folder}, e.g. {bad[0]}")
     paths.sort(key=lambda p: (frame_time(p), os.path.basename(p)))
-    return ((p, cv2.imread(p)) for p in paths)
+    return ((p, read_version(p)[0]) for p in paths)
 
 
 def file_version(path):
-    """(mtime in ns, size): changes whenever the file is written again, even under the same name."""
+    """Include identity and ctime to detect replacements even when size and mtime are preserved."""
     st = os.stat(path)
-    return st.st_mtime_ns, st.st_size
+    return st.st_mtime_ns, st.st_size, st.st_dev, st.st_ino, st.st_ctime_ns
 
 
-def watch(folder, poll=0.25, idle_exit=None, give_up_s=3.0, skip=None):
-    """(path, image) for each new image in folder, in arrival order, once it is unchanged for one poll and complete;
-    a file that stays incomplete for give_up_s is passed on anyway (logged as unreadable or as what it decodes to).
-    A file written again under the same name (new mtime or size: a camera that overwrites one file) is read again,
-    after the same checks. Runs until Ctrl-C, or until nothing new has arrived for idle_exit seconds.
+def read_version(path, version=None):
+    """Decode only complete bytes from a version unchanged throughout the read. No second file open for decoding."""
+    try:
+        version = file_version(path) if version is None else version
+        with open(path, "rb") as f:
+            data = f.read()
+        unchanged = file_version(path) == version
+    except OSError:
+        return None, False, False
+    finished = (data.endswith(b"IEND\xaeB`\x82") if path.lower().endswith(".png")
+                else data.rstrip(b"\x00").endswith(b"\xff\xd9"))
+    img = None
+    if unchanged and finished:
+        try:
+            img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+        except cv2.error:
+            pass
+    return img, finished, unchanged
+
+
+def watch(folder, poll=0.25, idle_exit=None, give_up_s=3.0, skip=None, stats=None, ix=None):
+    """(path, image, monotonic seen time) for each version unchanged during its read and complete;
+    an incomplete version is logged unreadable after give_up_s. Replacements under the same name are read again.
+    Runs until Ctrl-C, or until nothing new has arrived for idle_exit seconds.
     Images already in the folder when watch() is called are not read unless they are written again (CSI's camera
     folder still holds the staged test images); skip = the names to ignore instead (() reads everything)."""
-    names = [n for n in os.listdir(folder) if is_image(n)] if skip is None else skip
+    try:
+        names = [n for n in os.listdir(folder) if is_image(n)] if skip is None else skip
+    except OSError as e:
+        return _watch(folder, poll, idle_exit, give_up_s, None, stats, ix, f"{type(e).__name__}: {e}")
     seen = {}
     for n in names:
         try:
             seen[n] = file_version(os.path.join(folder, n))
         except OSError:
             pass
-    return _watch(folder, poll, idle_exit, give_up_s, seen)
+    if stats is not None:
+        stats["ignored_existing_images"] = len(seen)
+    return _watch(folder, poll, idle_exit, give_up_s, seen, stats, ix)
 
 
-def _watch(folder, poll, idle_exit, give_up_s, seen):
+def _watch(folder, poll, idle_exit, give_up_s, seen, stats, ix, initial_error=None):
     """seen: {name: version} of what was read (or ignored at start); pending: {name: (version, first seen)}."""
     pending, last = {}, time.monotonic()
+    failed = False
+    if initial_error:
+        print(f"WARNING folder {folder}: {initial_error}; retrying in {poll:g} s", flush=True)
+        yield folder, None, last, initial_error
+        failed = True
+        time.sleep(poll)
     while True:
-        for n in sorted(os.listdir(folder)):
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError as e:
+            note = f"{type(e).__name__}: {e}"
+            print(f"WARNING folder {folder}: {note}; retrying in {poll:g} s", flush=True)
+            yield folder, None, time.monotonic(), note
+            failed = True
+            if idle_exit is not None and time.monotonic() - last > idle_exit:
+                return
+            time.sleep(poll)
+            continue
+        if seen is None:                                 # first accessible snapshot still excludes staged images
+            seen = {}
+            for n in names:
+                if is_image(n):
+                    try:
+                        seen[n] = file_version(os.path.join(folder, n))
+                    except OSError:
+                        pass
+            if stats is not None:
+                stats["ignored_existing_images"] = len(seen)
+        if failed:
+            yield folder, None, time.monotonic(), ""
+            failed = False
+        for n in names:
             if not is_image(n):
                 continue
             p = os.path.join(folder, n)
@@ -225,67 +283,105 @@ def _watch(folder, poll, idle_exit, give_up_s, seen):
             if seen.get(n) == v:
                 continue
             now = time.monotonic()
-            if v[1] > 0 and n in pending and pending[n][0] == v and (complete(p) or now - pending[n][1] >= give_up_s):
-                img = cv2.imread(p)
-                try:
-                    unchanged = file_version(p) == v
-                except OSError:
-                    unchanged = False
-                if not unchanged:                       # rewritten while being read: take the next version instead
-                    pending.pop(n, None); continue
-                seen[n] = v; del pending[n]; last = now
-                yield p, img
-            elif n not in pending or pending[n][0] != v:
+            if n not in pending or pending[n][0] != v:
                 pending[n] = (v, now)
+            img, finished, unchanged = (None, True, True) if refusal(ix, p) else read_version(p, v)
+            if not unchanged:                           # rewritten while being read: take the next version instead
+                pending.pop(n, None); continue
+            if finished or now - pending[n][1] >= give_up_s:
+                seen[n] = v; del pending[n]; last = now
+                yield p, img, now
         if idle_exit is not None and time.monotonic() - last > idle_exit:
             return
         time.sleep(poll)
 
 
+CAPTURE_TIMEOUT_MS = 5000
+STREAM_STALL_S = 10.0
+CAPTURE_JOIN_S = CAPTURE_TIMEOUT_MS / 1000 + 0.5
+STREAM_FALLBACK = "use folder mode or stills saved by CSI (--source folder:DIR --gate each)"
+
+
 def open_capture(src):
-    """cv2.VideoCapture for stream:SRC: a device number ('0') or a URL / device path / file."""
-    return cv2.VideoCapture(int(src) if src.isdigit() else src)
+    """Live URLs require FFmpeg's open-time timeout parameters; never fall back to an unbounded backend."""
+    if src.isdigit() or src.startswith("/dev/"):
+        raise ValueError(f"device reads cannot be bounded; {STREAM_FALLBACK}")
+    try:
+        return cv2.VideoCapture(src, cv2.CAP_FFMPEG,
+                               [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, CAPTURE_TIMEOUT_MS,
+                                cv2.CAP_PROP_READ_TIMEOUT_MSEC, CAPTURE_TIMEOUT_MS])
+    except (AttributeError, cv2.error) as e:
+        raise ValueError(f"FFmpeg timeout parameters unavailable; {STREAM_FALLBACK}") from e
 
 
 class LatestFrame:
-    """Reads a live source continuously in a thread and keeps only its newest frame, so a slow consumer never works on
-    stale buffered video. A failed open or read is logged and retried after reconnect_s; the thread never raises."""
+    """One capture worker owns open/read/release; a supervisor detects stalls. Only the newest frame is retained.
+    A backend ignoring its deadlines stops the source, without spawning more blocked workers or racing release."""
 
     def __init__(self, src, reconnect_s=2.0, log=print, opener=open_capture):
         self.src, self.reconnect_s, self.log, self.opener = src, reconnect_s, log, opener
         self.lock, self.stopped = threading.Lock(), threading.Event()
         self.frame = self.t = None
+        self.failure = None
         self.n = self.connects = self.drops = 0
         self.thread = threading.Thread(target=self._run, daemon=True); self.thread.start()
 
+    def _capture(self, cancel, done, progress):
+        cap, got = None, 0
+        try:
+            cap = self.opener(self.src)
+            if not cap.isOpened():
+                self.log(f"WARNING stream {self.src}: cannot open with FFmpeg timeouts; retrying in {self.reconnect_s:g} s; {STREAM_FALLBACK}")
+            else:
+                self.connects += 1
+                while not self.stopped.is_set() and not cancel.is_set():
+                    ok, img = cap.read()
+                    if not ok or img is None or cancel.is_set() or self.stopped.is_set():
+                        break
+                    got += 1
+                    if got == 1:
+                        self.log(f"stream {self.src}: connected, {img.shape[1]}x{img.shape[0]}")
+                    with self.lock:
+                        self.frame, self.t, self.n = img, time.time(), self.n + 1
+                        progress[0] = time.monotonic()
+                if not self.stopped.is_set():
+                    self.drops += 1
+                    self.log(f"WARNING stream {self.src}: dropped after {got} frames; reconnecting in {self.reconnect_s:g} s")
+        except ValueError as e:
+            self.failure = str(e)
+            self.log(f"WARNING stream {self.src}: {e}; {STREAM_FALLBACK}")
+            self.stopped.set()
+        except Exception as e:
+            self.log(f"WARNING stream {self.src}: {type(e).__name__}: {e}; reconnecting in {self.reconnect_s:g} s")
+        finally:
+            try:
+                if cap is not None:
+                    cap.release()
+            except Exception:
+                pass
+            done.set()
+
     def _run(self):
         while not self.stopped.is_set():
-            cap, got = None, 0
-            try:
-                cap = self.opener(self.src)
-                if not cap.isOpened():
-                    self.log(f"WARNING stream {self.src}: cannot open; retrying in {self.reconnect_s:g} s")
-                else:
-                    self.connects += 1
-                    while not self.stopped.is_set():
-                        ok, img = cap.read()
-                        if not ok or img is None:
-                            break
-                        got += 1
-                        if got == 1:
-                            self.log(f"stream {self.src}: connected, {img.shape[1]}x{img.shape[0]}")
-                        with self.lock:
-                            self.frame, self.t, self.n = img, time.time(), self.n + 1
-                    if not self.stopped.is_set():
-                        self.drops += 1
-                        self.log(f"WARNING stream {self.src}: dropped after {got} frames; reconnecting in {self.reconnect_s:g} s")
-            except Exception as e:                              # never let the reader die
-                self.log(f"WARNING stream {self.src}: {type(e).__name__}: {e}; reconnecting in {self.reconnect_s:g} s")
-            finally:
-                try:
-                    cap is not None and cap.release()
-                except Exception:
-                    pass
+            cancel, done = threading.Event(), threading.Event()
+            progress = [time.monotonic()]
+            worker = threading.Thread(target=self._capture, args=(cancel, done, progress), daemon=True)
+            worker.start()
+            while not done.wait(min(.1, STREAM_STALL_S / 4)):
+                if self.stopped.is_set():
+                    break
+                with self.lock:
+                    stalled = time.monotonic() - progress[0] >= STREAM_STALL_S
+                if stalled:
+                    self.log(f"WARNING stream {self.src}: no new frame for {STREAM_STALL_S:g} s; releasing and reconnecting")
+                    break
+            cancel.set()
+            worker.join(timeout=CAPTURE_JOIN_S)
+            if worker.is_alive():
+                self.failure = f"capture did not stop within its deadline; {STREAM_FALLBACK}"
+                self.log(f"WARNING stream {self.src}: {self.failure}")
+                self.stopped.set()
+                return
             self.stopped.wait(self.reconnect_s)
 
     def latest(self):
@@ -293,7 +389,7 @@ class LatestFrame:
             return self.n, self.frame, self.t
 
     def stop(self):
-        self.stopped.set(); self.thread.join(timeout=5)
+        self.stopped.set(); self.thread.join(timeout=CAPTURE_JOIN_S + .2)
 
 
 def stream(src, every=1.0, idle_exit=None, reconnect_s=2.0, log=print, stats=None, opener=open_capture):
@@ -311,6 +407,8 @@ def stream(src, every=1.0, idle_exit=None, reconnect_s=2.0, log=print, stats=Non
         while True:
             tick = max(tick + every, time.monotonic()); time.sleep(max(0.0, tick - time.monotonic()))
             n, img, t = reader.latest()
+            if reader.stopped.is_set() and reader.failure:
+                raise RuntimeError(reader.failure)
             if n == last_n:
                 if idle_exit is not None and time.monotonic() - last_new > idle_exit:
                     return
@@ -421,6 +519,7 @@ class Session:
         insp_info = self.insp.info()                    # model sha in the trial log = the inspector's first file
         self.git, self.model_sha = code_version(), next(iter(insp_info["files"].values()), "")
         self.events, self.counts, self.latency, self.stop_reason = 0, Counter(), [], "end of source"
+        self.source_error = None
         os.makedirs(os.path.join(out, "overlays"), exist_ok=True)
         with open(os.path.join(out, VIEW_HTML), "w") as f:
             f.write(VIEW_PAGE.format(session=self.name))
@@ -453,14 +552,17 @@ class Session:
         except R.ProtectedDataError:
             return "live"
 
-    def process_frame(self, path, img, t=None):
+    def process_frame(self, path, img, t=None, source_error=None):
         """One input frame (any source). Logs exactly one trial-log row and returns it."""
         t0 = time.perf_counter(); name = frame_id(path)
         row = {"time_utc": self.now(), "session": self.name, "git": self.git, "inspector": self.insp.name,
                "model_sha256": self.model_sha, "input_file": os.path.basename(path)}
         try:
             why = refusal(self.ix, path)
-            if why:
+            if source_error is not None:
+                self.source_error = source_error or None
+                row.update(status="source_error" if source_error else "source_recovered", note=source_error)
+            elif why:
                 row.update(status="refused", note=why)
             elif img is None:
                 row.update(status="unreadable", note="could not decode the image")
@@ -513,6 +615,8 @@ class Session:
 
     def close(self):
         self.preds.close(); self.trial.close()
+        if self.source_error and self.stop_reason == "end of source":
+            self.stop_reason = f"source error: {self.source_error}"
         lat = sorted(self.latency)
         self.write_info(ended_utc=self.now(), stop_reason=self.stop_reason, frames=sum(self.counts.values()),
                         events=self.events, status_counts=dict(self.counts),
@@ -544,6 +648,9 @@ def run(session, frames):
             session.process_frame(*f)
     except KeyboardInterrupt:
         session.stop_reason = "ctrl-c"
+    except Exception as e:
+        session.stop_reason = f"source error: {type(e).__name__}: {e}"
+        raise
     finally:
         getattr(frames, "close", lambda: None)()                # stops a stream's reader thread
         session.close()
@@ -583,12 +690,13 @@ def preflight(data, out):
         exp = {(r["frame"], r["position"]): r for r in csv.DictReader(open(os.path.join(data, "expected", name + ".csv"), newline=""))}
         got = {(r["frame"], r["position"]): r for r in preds}
         differ = [k for k in exp if k not in got or (got[k]["predicted_state"], got[k]["final_state"]) != (exp[k]["predicted_state"], exp[k]["final_state"])]
-        dmax = max((abs(float(got[k]["defect_score"]) - float(exp[k]["defect_score"])) for k in exp if k in got), default=float("nan"))
+        diffs = [abs(float(got[k]["defect_score"]) - float(exp[k]["defect_score"])) for k in exp if k in got]
+        dmax = max(diffs, default=float("inf")) if all(np.isfinite(d) for d in diffs) else float("inf")
         st, paths = Counter(r["status"] for r in trial), {r["path"] for r in trial}
-        good = not differ and set(got) == set(exp) and set(st) == {"scored"} and paths == {path}
+        good = not differ and set(got) == set(exp) and set(st) == {"scored"} and paths == {path} and dmax == 0
         ok &= good
         sets[name] = {"frames": len(trial), "holes": len(got), "final_states": dict(Counter(r["final_state"] for r in preds)),
-                      "differ_from_mac": [list(k) for k in differ], "max_score_diff": dmax, "statuses": dict(st),
+                      "differ_from_mac": [list(k) for k in differ], "max_score_diff": dmax if np.isfinite(dmax) else None, "statuses": dict(st),
                       "paths": sorted(paths), "ok": good}
         print(f"{name:10s} {len(trial):2d} frames, path {'/'.join(sorted(paths))}, {dict(Counter(r['final_state'] for r in preds))}; "
               f"vs Mac: {len(differ)} holes differ, max |score diff| {dmax:.2g} -> {'OK' if good else 'FAIL'}")
@@ -638,7 +746,6 @@ if __name__ == "__main__":
         if not (kind in ("replay", "folder") and os.path.isdir(folder) or kind == "stream" and folder):
             ap.error("--source must be replay:DIR or folder:DIR with an existing DIR, or stream:URL|DEVICE|FILE")
         ix = dataset_index()
-        old = sorted(n for n in os.listdir(folder) if is_image(n)) if kind == "folder" else []
         stats = {}
         if kind == "stream":
             why = stream_refusal(ix, folder)
@@ -646,13 +753,13 @@ if __name__ == "__main__":
                 raise R.ProtectedDataError(why)
             frames = stream(folder, a.every, a.idle_exit, stats=stats)
         else:
-            frames = replay(folder, ix) if kind == "replay" else watch(folder, a.poll, a.idle_exit, skip=old)
+            frames = replay(folder, ix) if kind == "replay" else watch(folder, a.poll, a.idle_exit, stats=stats, ix=ix)
         out = a.out or os.path.join(P.HERE, "results", "live", datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
         insp = make_inspector(a.inspector, a.threshold, a.model_dir, a.device)
         s = Session(out, a.source, a.run_id, a.gate, a.mode, a.track, a.labels, a.note, ix=ix, inspector=insp)
         if kind == "folder":
-            s.write_info(ignored_existing_images=len(old))
-            print(f"watching {folder}: {len(old)} image(s) already there are ignored; new images only")
+            s.write_info(**stats)
+            print(f"watching {folder}: {stats.get('ignored_existing_images', 'unknown')} image(s) already there are ignored; new images only")
         elif kind == "stream":
             print(f"stream {folder}: " + (f"video file, one frame per {a.every:g} s of its own timestamps" if os.path.isfile(folder)
                   else f"live source, newest frame every {a.every:g} s; drops are logged and reconnected (Ctrl-C to stop)"))
@@ -661,3 +768,5 @@ if __name__ == "__main__":
         run(s, frames)
         if kind == "stream":
             s.write_info(stream={"source": folder, "every_s": a.every, **stats})
+        elif kind == "folder":
+            s.write_info(**stats)

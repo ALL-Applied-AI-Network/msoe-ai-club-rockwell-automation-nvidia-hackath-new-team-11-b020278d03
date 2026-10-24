@@ -201,8 +201,8 @@ class FolderSource(unittest.TestCase):
         s, out = session(); picked = []
         frames = L.watch(d, poll=0.1, idle_exit=1.5)                            # empty folder at start
         th = threading.Thread(target=writer); th.start()
-        for path, img in frames:
-            picked.append((os.path.basename(path), time.monotonic(), s.process_frame(path, img)["status"]))
+        for path, img, t in frames:
+            picked.append((os.path.basename(path), time.monotonic(), s.process_frame(path, img, t)["status"]))
         th.join(); s.close()
         self.assertEqual([p[0] for p in picked], [name(k) for k in range(6)])
         self.assertEqual({p[2] for p in picked}, {"scored"})                    # the half-written file was not read early

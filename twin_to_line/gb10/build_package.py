@@ -11,6 +11,7 @@ Writes <out>/ttl_gb10_<sha>/ and <out>/ttl_gb10_<sha>.tar (+ .sha256), never int
   preflight/    the CSI 1080 still, 10 DEV run-1 event frames (640) and their 1080 copies, and the Mac's predictions for
                 all three (expected/), produced here by the same live_inspect code from the working tree, which must
                 equal the commit
+  data_index/   filename/timestamp/run metadata only, to refuse protected stills without the real dataset
   bootstrap.sh, README.txt, IMPORTS.txt, FILES.txt, SHA256SUMS
 Only DEV run 1 frames are bundled (real_data refuses anything else).
 """
@@ -68,6 +69,17 @@ def wheels(dst):
         open(os.path.join(d, "requirements.txt"), "w").write("\n".join(pins) + "\n")
 
 
+def package_index(dst):
+    """Protection metadata only: no images or videos are opened or copied."""
+    ix = R.Index()
+    os.makedirs(dst)
+    with open(os.path.join(dst, "image_index.csv"), "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "timestamp", "video_id"])
+        w.writeheader()
+        for name, run in sorted(ix.run_of.items()):
+            w.writerow({"filename": name, "timestamp": ix.time_of[name].isoformat(), "video_id": run})
+
+
 def preflight_data(dst):
     """The bundled frames and the Mac's predictions for them (the same code as live_inspect --preflight)."""
     ix = R.Index(); events = [r["frame"] for r in csv.DictReader(open(EVENTS1))][-N_FRAMES:]
@@ -106,6 +118,7 @@ def main():
     ap = argparse.ArgumentParser(description="build the GB10 package from one commit")
     ap.add_argument("--out", default=os.path.join(HERE, "results", "gb10_pkg"))
     a = ap.parse_args()
+    a.out = os.path.abspath(a.out)                            # git -C must not reinterpret a caller-relative output
     commit = git("rev-parse", "HEAD"); short = commit[:7]
     changed = git("status", "--porcelain", "--", *L.RUNTIME_FILES, "replay_1080.py", "gb10", "ARCHIVE_COMMIT", ".gitattributes")
     if changed:
@@ -124,6 +137,7 @@ def main():
         raise SystemExit(f"code.tar: missing {missing} or ARCHIVE_COMMIT {stamp!r} != {commit}")
     python_runtime(os.path.join(pkg, "runtime"))
     wheels(os.path.join(pkg, "wheels"))
+    package_index(os.path.join(pkg, "data_index"))
     events = preflight_data(os.path.join(pkg, "preflight"))
     shutil.copy2(os.path.join(HERE, "gb10", "bootstrap.sh"), pkg)
     status, mods = import_trace(pkg)

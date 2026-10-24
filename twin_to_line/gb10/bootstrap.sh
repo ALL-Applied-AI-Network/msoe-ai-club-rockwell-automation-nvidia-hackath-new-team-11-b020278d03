@@ -10,12 +10,19 @@ T0=$(date +%s)
 step() { echo "== $* ($(( $(date +%s) - T0 )) s)"; }
 fail() { echo "BOOTSTRAP FAILED: $*"; exit 1; }
 
+# Never erase evidence when somebody repeats the installation command.
+for results in code/twin_to_line/results preflight_out; do
+    if [ -e "$results" ] || [ -L "$results" ]; then
+        fail "results already exist at $results; unpack the package into a fresh folder. Existing results are untouched"
+    fi
+done
+
 step "1/5 checksums"
 sha256sum --quiet -c SHA256SUMS || fail "SHA256SUMS mismatch: copy the package again"
 echo "SHA256SUMS OK ($(wc -l < SHA256SUMS) files)"
 
 step "2/5 code"
-rm -rf code && mkdir code && tar -xf code.tar -C code || fail "could not unpack code.tar"
+mkdir -p code && tar -xf code.tar -C code || fail "could not unpack code.tar"
 echo "commit $(cat code/twin_to_line/ARCHIVE_COMMIT)"
 
 step "3/5 python"
@@ -45,7 +52,6 @@ fi
 venv/bin/python -m pip list --disable-pip-version-check 2>/dev/null | grep -i -E "numpy|opencv"
 
 step "5/5 preflight"
-rm -rf preflight_out
 (cd code/twin_to_line && ../../venv/bin/python live_inspect.py --preflight "$PKG/preflight" --out "$PKG/preflight_out") \
     || fail "preflight (see preflight_out/preflight.json)"
 echo "BOOTSTRAP OK in $(( $(date +%s) - T0 )) s"

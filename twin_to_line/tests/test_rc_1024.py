@@ -110,16 +110,20 @@ def test_unacceptable_version_logs_once_after_three_seconds_then_accepts_repair(
     assert s.events == 1
 
 
-def test_runbook_existing_install_does_not_exit_the_terminal(tmp_path):
+def test_runbook_checksum_failure_stops_setup_without_exiting_terminal(tmp_path):
     doc = (HERE / "LIVE_RUNBOOK.md").read_text()
-    block = doc.split("1. **Before 12:30", 1)[1].split("```bash", 1)[1].split("```", 1)[0]
-    start = block.index('   test ! -e') if '   test ! -e' in block else block.index('   if [ -e')
-    guard = block[start:].replace("<sha>", "review")
-    (tmp_path / "ttl_gb10_review").mkdir()
-    result = subprocess.run(["bash", "-c", guard+'\nprintf "TERMINAL_ALIVE\\n"\n'],
-                            cwd=tmp_path, capture_output=True, text=True)
+    block = doc.split("## 7. Monday Oct 26", 1)[1].split("```bash", 1)[1].split("```", 1)[0]
+    block = "\n".join(line[3:] if line.startswith("   ") else line for line in block.splitlines())
+    block = block.replace("$HOME/ttl", str(tmp_path / "ttl"))
+    usb = tmp_path / "usb"; usb.mkdir()
+    (usb / "ttl_gb10_abcdef0.tar").write_bytes(b"not an archive")
+    (usb / "ttl_gb10_abcdef0.tar.sha256").write_text("0" * 64 + "  ttl_gb10_abcdef0.tar\n")
+    result = subprocess.run(["bash", "-c", block + '\nprintf "TERMINAL_ALIVE\\n"\n'],
+                            input=str(usb) + "\nttl_gb10_abcdef0\n", capture_output=True, text=True)
     assert result.returncode == 0 and "TERMINAL_ALIVE" in result.stdout
-    assert "fresh folder" in result.stdout.lower()
+    assert "STOP: setup failed" in result.stderr
+    assert "SETUP OK" not in result.stdout and "BOOTSTRAP OK" not in result.stdout
+    assert not list((tmp_path / "ttl").glob("visit_*/install_*/ttl_gb10_abcdef0"))
 
 
 @pytest.mark.parametrize("padding", [0, 1, 2, 12, 4096])

@@ -63,7 +63,7 @@ never writes into the image folder (R10).
      322c29ec2ea9`; with `--inspector resnet`: `inspector resnet18_synth_v1[d038] t=0.50224 (pre-registered 0.99968)
      on mps  results/train/resnet18_v1/model.pt 8380851f8b4e`.
    - `watching <IN>: N image(s) already there are ignored; new images only`: images already in `IN` at the start
-     (e.g. the staged test images in the camera folder) are never read; `session.json` records N.
+     (unchanged files only) are not read; `session.json` records N.
    - `operator view: this console (one grid per event), <OUT>/overlay_latest.png, or <OUT>/view.html in a browser`.
      Then nothing until the first event.
    - Within ~2 s, `$OUT` contains `overlays/`, `predictions.csv`, `session.json`, `trial_log.csv` and `view.html`.
@@ -138,11 +138,24 @@ never writes into the image folder (R10).
 - The 22 staged images are the sealed test (D036). On the day they are only **copied off to the USB stick with their
   sha256** (§7 step 4). Monday evening their labels are adjudicated and locked (the labels CSV and its sha256 written
   down) before any output is looked at. Then each arm is scored once.
-- They stay out of every run on the day: CSI saves them in the camera folder, and the live run starts only after
-  staging is done; folder mode ignores the images already in `IN` at its start (§1.2).
-- Scoring later (after the labels are locked, on the Mac), once per arm:
-  `../.venv/bin/python live_inspect.py --source replay:<staged dir> --gate each --inspector <rule|resnet> --out results/live/sealed_<arm>`.
-  For the ResNet, also run `--threshold preregistered` into its own `OUT` and report it next to the D038 result.
+- They stay out of every run on the day: CSI saves them in the separate `STAGED` folder. After verified USB
+  backup and a fixture reset, live uses a fresh folder/feed (§7); existing-file skipping alone is not a seal.
+- Scoring later (after labels are locked, on the Mac): run `score_sealed.py` once for all five declared operating
+  points (A D038, A pre-registered, B synthetic, B′ DEV-fit, B″ good-only DEV). This wrapper injects each inspector
+  into the unchanged `live_inspect.Session`; never swap threshold files to select an arm.
+  ```bash
+  read -r -p 'Staged images directory: ' SEALED
+  read -r -p 'Adjudicated labels CSV: ' LABELS
+  read -r -p 'Previously recorded full labels SHA256: ' LABELS_SHA
+  ../.venv/bin/python score_sealed.py "$SEALED" --labels "$LABELS" --labels-sha256 "$LABELS_SHA" \
+      --out "results/sealed/evaluation_$(date +%Y%m%dT%H%M%S)" --device cpu
+  ```
+  Labels must contain exactly one row for every input frame × G01–G30, with `frame`, `position`, `ground_truth`,
+  `gt_sequence`; use runtime frame IDs (ordinary filename including extension; cached video IDs omit the final `.png`).
+  Keep exclusions explicit via `usable=0`; arm-occluded images are logged and not scored. The wrapper snapshots
+  images and locked labels, records each arm's provenance/coverage, and refuses existing outputs or image bytes
+  already attempted in `results/sealed_score_locks`. A failed attempt remains locked; do not delete the ledger
+  or rerun in another checkout. The wrapper produces predictions, not fitted thresholds or a selected winner.
 - `--gate each` scores every arm-clear image on its own: each staged setup is an independent fixture, and its fill
   frontier comes from that image alone (tested: two different fixtures in a row give the same result as each alone).
   **Never add `--track`** here: the tracker carries MISSED latches from one image to the next. An image with the arm
@@ -162,128 +175,199 @@ never writes into the image folder (R10).
   image (R7 target ≤ 1 s); a 1920×1080 frame adds ~3.4 ms for the warp. ResNet start-up (torch, model load, warm-up)
   takes about 2.5 s before its first line.
 
-## 7. Monday Oct 26 on CSI's GB10: start to stop
-Our software runs on CSI's GB10 (aarch64 Linux) from the frozen package, rule inspector only (no torch, no Isaac). The
-package brings its own Python 3.11 and wheels and installs offline; it writes only inside its own folder.
-Rehearsed Oct 23 on the YAAD Spark (NVIDIA DGX Spark, GB10, Ubuntu 24.04.3, glibc 2.39, no system Python):
-unpack → `PREFLIGHT OK` in **5 s**; package 243 MB (596 MB unpacked); DEV run 1 replayed at 640 and as 1080 copies
-gave the same states and scores as the Mac, hole for hole. The system-Python fallback (bundled Python disabled), as
-a non-root user with the package in the home folder, passed in arm64 Ubuntu 22.04 (Python 3.10) and 24.04 (Python
-3.12) containers: `PREFLIGHT OK` in 6 s and 5 s, identical to the Mac.
+## 7. Monday Oct 26 on CSI's GB10: USB in to results on USB
 
-**Bring:** USB stick with `ttl_gb10_<sha>.tar` + `ttl_gb10_<sha>.tar.sha256` (built from the freeze commit), room on it
-for the results; printed staging list, label sheet and this section; paper log.
+**12:30–2:00 only; no installation before the slot.** Frozen rule B′ runs offline on aarch64 Linux;
+no torch or Isaac is needed. Organizer permission for its DEV-fit thresholds remains a condition.
+Bring the Sunday-attested package and checksum on USB, printed staging/numbering sheets, label log,
+paper intervention log, laptop, charger and pen. Confirm CSI's supervisor and approved file/feed route;
+never change cameras, plant controls or network settings.
 
-1. **Before 12:30 (≈5 min): install and check.** Open a terminal on the GB10.
-   ```bash
-   lsblk -o NAME,SIZE,MOUNTPOINT                 # find the stick, e.g. /media/<user>/<label>
-   USB=/media/<user>/<label>
-   mkdir -p ~/ttl && cp "$USB"/ttl_gb10_<sha>.tar* ~/ttl/ && cd ~/ttl
-   sha256sum -c ttl_gb10_<sha>.tar.sha256        # -> ttl_gb10_<sha>.tar: OK
-   if [ -e "ttl_gb10_<sha>" ]; then
-       echo "Use a fresh folder; keep existing results"
-   else
-       tar -xf "ttl_gb10_<sha>.tar" && cd "ttl_gb10_<sha>" && bash bootstrap.sh
-   fi
-   ```
-   Expected (Spark, 5 s in total):
-   ```
-   == 1/5 checksums (0 s)
-   SHA256SUMS OK (40 files)
-   == 2/5 code (0 s)
-   commit <the freeze commit>
-   == 3/5 python (0 s)
-   python /home/<user>/ttl/ttl_gb10_<sha>/pyhome/python/bin/python3 (Python 3.11.17), wheels/cp311
-   == 4/5 venv + install (1 s)
-   numpy                  2.4.6
-   opencv-python-headless 5.0.0.93
-   == 5/5 preflight (4 s)
-   os / kernel / arch aarch64 / glibc / python 3.11.17 / numpy 2.4.6 / opencv 5.0.0 / torch not installed (not needed)
-   code     <sha> (archive)
-   sha256   ...  (one line per runtime file; check them against the freeze record)
-   still_1080  1 frames, path 1080->640, {'WAITING': 30}; vs Mac: 0 holes differ, max |score diff| 0 -> OK
-   run1_640   10 frames, path 640, {'UNSURE': 39, 'PASS': 79, 'MISSED': 10, 'WAITING': 172}; vs Mac: 0 holes differ, max |score diff| 0 -> OK
-   run1_1080  10 frames, path 1080->640, {'UNSURE': 36, 'PASS': 82, 'MISSED': 10, 'WAITING': 172}; vs Mac: 0 holes differ, max |score diff| 0 -> OK
-   PREFLIGHT OK -> .../preflight_out/preflight.json
-   BOOTSTRAP OK in 5 s
-   ```
-   Hashes to check by eye: `rule_thresholds.json` 322c29ec…, `frame_warp_1080.json` 9837b298…, `position_map_G.json`
-   7ffaf48c…, `registration_dev.json` 6dd0de1b….
-   If it stops with `BOOTSTRAP FAILED: ...`:
-   - `results already exist`: bootstrap refuses before cleanup or installation. It never deletes or moves results.
-     Keep that folder; unpack the original tar into a fresh parent folder and run its `bootstrap.sh`. This includes
-     `preflight_out` from an earlier successful or failed preflight. Do not unpack over an existing installation.
-   - `SHA256SUMS mismatch`: copy the tar again from the stick.
-   - `bundled Python not usable here; trying the system Python`: this line alone is fine if a `python ...` line and `OK`
-     follow. `no usable Python`: stop and tell Noor (no install on CSI's machine without CSI's OK).
-   - `offline install failed`: only if CSI allows internet on the GB10: `bash bootstrap.sh --online`. Else stop.
-   - `preflight`: **don't run.** Note which set says `FAIL`; results on this machine would differ from the Mac.
-   Preflight compares the bundled **still images** only: every state must match and all scores must be finite with
-   score difference exactly **0**. Video decoding is outside preflight's scope. The package also carries a
-   checksummed metadata-only `data_index/image_index.csv` to refuse known protected still filenames without raw data.
-   Then, for every later step:
-   ```bash
-   cd ~/ttl/ttl_gb10_<sha>/code/twin_to_line
-   PY=../../venv/bin/python
-   ```
-2. **How do frames arrive?** Ask CSI, then pick the row (step 5 uses it). Saved files: `IN=<the folder>`, and check
-   one image with `$PY -c "import cv2,sys; print(cv2.imread(sys.argv[1]).shape)" "$IN/<newest file>"` →
-   `(1080, 1920, 3)` (or `(480, 640, 3)`; anything else, e.g. `(240, 320, 3)`, is `wrong_size`: ask for 1920×1080).
-   A live stream: `SRC=<the RTSP or HTTP URL>`. Raw camera devices require the folder/stills fallback below.
-3. **12:30 staging.** Nothing of ours runs during staging. CSI saves one image per staged setup, in the camera
-   folder `IN`. Noor and Tony fill the label sheet per setup (image file name ↔ setup).
-4. **Staged images: copy them off, don't run anything on them** (§5). Copy exactly the images on the label sheet:
-   ```bash
-   ls -lt "$IN" | head -25                         # the staged images, newest first
-   mkdir -p ~/ttl/staged_20261026 && cp -p "$IN"/<each staged file> ~/ttl/staged_20261026/
-   cd ~/ttl && tar -cf staged_20261026.tar staged_20261026 && sha256sum staged_20261026.tar > staged_20261026.tar.sha256
-   cp staged_20261026.tar staged_20261026.tar.sha256 "$USB"/ && sync
-   (cd "$USB" && sha256sum -c staged_20261026.tar.sha256)     # -> staged_20261026.tar: OK
-   ls ~/ttl/staged_20261026 | wc -l                 # -> 22
-   ```
-   Monday evening on the Mac: adjudicate and lock the labels, then score once per arm (§5).
-5. **Live run, only after staging is done.** Always from `~/ttl/ttl_gb10_<sha>/code/twin_to_line`, with
-   `OUT=results/live/csi_live_$(date +%Y%m%d_%H%M%S)` (a new one for every start) and the row that matches step 2:
+**Time limits:** 12:30–12:45 setup; 12:45–1:30 staging; 1:30–1:35 sealed backup;
+1:35–1:50 live; 1:50–2:00 export. These are allowances, not measured staging times.
+Cut optional live defects first, filming second, then live duration. Never cut labels or backups.
 
-   | Frames arrive as | Command (`$PY live_inspect.py` + …) | Expected first lines (after the `inspector …` line) |
-   |---|---|---|
-   | New image files in a folder | `--source folder:"$IN" --out "$OUT"` | `watching <IN>: N image(s) already there are ignored; new images only` |
-   | One file rewritten again and again (same name) | the same command | the same; the trial log repeats that file name, one row per new version |
-   | A live video stream (RTSP / HTTP URL) — **untested on a live camera** | `--source stream:"$SRC" --every 1.0 --out "$OUT"` | `stream <SRC>: live source, newest frame every 1 s; …`, then `stream <SRC>: connected, 1920x1080` |
-   | A raw camera device on the GB10 (`0`, `/dev/video0`) | Ask CSI to save images; use `--source folder:"$IN" --out "$OUT"` (add `--gate each` for independent stills) | Direct device mode is refused because its reads cannot be bounded |
-   | Stills saved only on request (CSI saves one image per fixture state) | `--source folder:"$IN" --gate each --out "$OUT"` | `watching <IN>: …`; then one event line + grid per saved still |
-   | Nothing reachable | no live run; staging is unaffected | — |
+1. **12:30 setup: identify the USB and set the paths once.** Use Bash. `lsblk -o NAME,SIZE,MOUNTPOINT`
+   shows mounts; CSI must mount an unmounted stick. Enter actual values at the prompts (no angle-bracket
+   substitutions). `PKG` is the package basename printed in Sunday's attestation, without `.tar`.
+   `IN` is a new folder that CSI must agree to write into after staging; if CSI cannot do so, use the
+   approved fresh stream or on-request stills route below. Do not point it at the staged folder.
 
-   All rows go through the same path (size switch, D039 warp, event gate, rule) and print the `operator view: …` line,
-   then nothing until the first event. After 4 s of a still fixture with the arm away (`--gate each`: at once):
-   `event N <frame> K=.. delay 4.0s ...` and under it the 6×5 grid (§2), the primary operator view. Extra, if the GB10
-   has a browser: `xdg-open "$OUT/view.html"` (reloads the latest overlay every second). In a second terminal
-   `tail -f "$OUT/trial_log.csv" | cut -d, -f6,8,77` shows one `<frame>,<status>,<path>` line per frame (folder: within
-   ~1 s of the file appearing, Spark 0.3–0.4 s; stream: one per `--every` s, named `stream_<UTC time>`).
-   - **Stream drops:** `WARNING stream <SRC>: dropped after N frames; reconnecting in 2 s` (or `cannot open; retrying`)
-     is logged and the stream is reopened. FFmpeg open and read calls each request a 5 s timeout. A watchdog prints
-     `WARNING ... no new frame for 10 s` and requests release and reconnect. Release happens after the reader returns,
-     with a further bounded 5.5 s wait. If the backend ignores the deadlines, the source stops and prints the
-     folder/stills fallback; it does not accumulate blocked reader threads. Devices or backends without bounded reads
-     require CSI to save files: `--source folder:"$IN"` (independent stills: add `--gate each`). FFmpeg may print its own lines (e.g.
-     `Stream ends prematurely`); they are harmless. If an RTSP stream keeps dropping, try
-     `export OPENCV_FFMPEG_CAPTURE_OPTIONS="rtsp_transport;tcp"` before the command. Checked Oct 23 only against a
-     local MJPEG-over-HTTP server (connect, event after 4.1 s, drop, reconnect, Ctrl-C) and the DEV run 1 video as a
-     file (same 18 events as the replay); the GB10's aarch64 OpenCV decodes video slightly differently from the Mac
-     (3 of 540 DEV holes, all at rule thresholds, changed state).
-   - **Files that arrive one at a time** (saved on a trigger, or seconds apart): look at
-     `cut -d, -f6,7,8 "$OUT/trial_log.csv"` (file, frame time, status). Images ≥ 4 s apart while the fixture stays the
-     same: the event comes with the second image (its delay = the gap). Every image a new fixture state, or `frame_t`
-     not increasing: the status stays `settling` and no event ever comes. Then Ctrl-C and start again into a **new**
-     `OUT` with `--gate each` (the "stills on request" row): every arm-clear image is scored on its own (Spark: 0.4 s
-     after the file appeared). Images that arrived before the restart are ignored. Log the restart as an intervention.
-6. **Stop.** Ctrl-C once → `N frames, M events, {...} -> <OUT>`; `session.json` has `"stop_reason": "ctrl-c"`.
-7. **Copy the results to the stick, with sha256.**
    ```bash
-   cd ~/ttl && tar -cf ttl_results_20261026.tar -C ttl_gb10_<sha> preflight_out code/twin_to_line/results/live
-   sha256sum ttl_results_20261026.tar > ttl_results_20261026.tar.sha256
-   cp ttl_results_20261026.tar ttl_results_20261026.tar.sha256 "$USB"/ && sync
-   (cd "$USB" && sha256sum -c ttl_results_20261026.tar.sha256)     # -> ttl_results_20261026.tar: OK
+   read -r -p 'Mounted USB directory: ' USB
+   read -r -p 'Sunday package basename, without .tar: ' PKG
+   DAY="$HOME/ttl/visit_$(date +%Y%m%dT%H%M%S)_$$"
+   STAGED="$DAY/staged"
+   IN="$DAY/live_in"
+   OUT="$DAY/attempts/live_$(date +%Y%m%dT%H%M%S)_$$"
+   INSTALL="$DAY/install_$(date +%Y%m%dT%H%M%S)_$$"
+   (
+     set -euo pipefail
+     trap 'echo "STOP: setup failed; preserve this visit folder. Do not start live." >&2' ERR
+     [[ "$PKG" =~ ^ttl_gb10_[0-9a-f]+$ ]]
+     test -d "$USB" && test -w "$USB"
+     mkdir -p "$HOME/ttl"
+     mkdir "$DAY"
+     mkdir "$STAGED" "$IN" "$DAY/attempts" "$DAY/records" "$INSTALL"
+     printf '%s\n' 'time,action,operator,notes' > "$DAY/records/interventions.csv"
+     printf '%s\n' 'setup,filename,capture_time,collector,measured_tilt,notes' > "$DAY/records/staging_log.csv"
+     printf '%s\n' 'No live attempt yet.' > "$DAY/records/live_status.txt"
+     cp "$USB/$PKG.tar" "$USB/$PKG.tar.sha256" "$INSTALL/"
+     cd "$INSTALL"
+     sha256sum -c "$PKG.tar.sha256"
+     tar -xf "$PKG.tar"
+     cd "$PKG"
+     bash bootstrap.sh 2>&1 | tee "$DAY/records/bootstrap_$(date +%Y%m%dT%H%M%S).log"
+     printf 'USB=%q\nPKG=%q\nDAY=%q\nSTAGED=%q\nIN=%q\nOUT=%q\nINSTALL=%q\n' \
+       "$USB" "$PKG" "$DAY" "$STAGED" "$IN" "$OUT" "$INSTALL" > "$DAY/operator.env"
+     echo "SETUP OK; context: $DAY/operator.env"
+   )
    ```
-   Keep `~/ttl` on the GB10 until the stick has been checked on the Mac (`shasum -a 256 -c`); then remove it only if
-   CSI asks. Delete nothing else on CSI's machine.
+
+   **Proceed only after `PREFLIGHT OK`, `BOOTSTRAP OK` and `SETUP OK`. Any checksum failure is STOP.**
+   The subshell can fail without closing the terminal. Check the archive commit against Sunday's attestation.
+   Expected rehearsal: offline bootstrap about 5 s; all still-image states equal the Mac, score difference 0.
+   Video parity is not covered (RC MP4: 3/540 state differences). The RC package is not the Sunday release.
+   A failed attempt stays in `DAY`. For an installation retry repeat step 1, creating a new timestamped visit;
+   retain every visit under `~/ttl` for step 7. Never unpack over an installation.
+   Bundled-Python failure falls back automatically to system Python 3.10–3.12 with venv (container-tested).
+   No usable Python or failed preflight: no live run. Offline-install failure: CSI may permit a fresh attempt
+   using `bash bootstrap.sh --online`; record it. No permission means staging only.
+
+2. **Confirm capture delivery before staging.** Ask CSI to save each setup once under a unique name,
+   `setup_00.jpg` through `setup_21.jpg` (PNG is also accepted), in `STAGED`.
+   A camera that overwrites one filename requires CSI to save a separate immutable copy after every setup,
+   before changing the fixture. Check image dimensions without an inspector:
+
+   ```bash
+   PY="$INSTALL/$PKG/venv/bin/python"
+   read -r -p 'Full path of a CSI capture to check dimensions: ' CHECK_IMAGE
+   "$PY" -c 'import cv2,sys; im=cv2.imread(sys.argv[1]); print(None if im is None else im.shape)' "$CHECK_IMAGE"
+   ```
+
+   Expect `(1080, 1920, 3)` or `(480, 640, 3)`. Wrong size, including 320×240: ask CSI for supported
+   stills; never resize, crop, re-aim or recalibrate. If unavailable, preserve the collection and log that
+   live inference could not run. Real capped 1080 images, CSI's own GB10 and its camera stream remain unverified.
+
+3. **12:45–1:30 staging: no inspector runs.** Noor and Tony reconcile each setup 00–21 to its unique saved
+   filename in `records/staging_log.csv`; record capture time, collector, actual positions/classes, tilt evidence
+   and deviations on the label sheet. Do not infer ground truth from model output. Keep per-setup timing and
+   interventions. Side photos/filming need CSI's approval. Save label sheets and a legible photo or transcription
+   of the paper log under `records` before backup; retain the originals. Geometry-only overlays are permitted
+   for later adjudication; predictions, scores and model-coloured overlays are not.
+
+4. **1:30–1:35 seal and verify on USB BEFORE live.** Reconcile filenames and exactly 22 unique setups against
+   the log, check no image is still being written, and ask CSI to stop writing to `STAGED`. This block checks
+   the log, packages images plus records without inference, and verifies the copied archive. Count alone is
+   insufficient. On failure: STOP; do not start live or discard the source files.
+
+   ```bash
+   (
+     set -euo pipefail
+     trap 'echo "STOP: sealed backup failed; no live run." >&2' ERR
+     "$PY" - "$STAGED" "$DAY/records/staging_log.csv" <<'PY'
+   import csv, pathlib, sys
+   folder = pathlib.Path(sys.argv[1])
+   rows = list(csv.DictReader(open(sys.argv[2], newline="")))
+   names = [r["filename"] for r in rows]
+   assert len(rows) == 22 and {r["setup"] for r in rows} == {f"{i:02d}" for i in range(22)}
+   assert len(set(names)) == 22 and all(pathlib.Path(n).name == n for n in names)
+   images = {p.name for p in folder.iterdir() if p.suffix.lower() in {".jpg", ".jpeg", ".png"}}
+   assert set(names) == images, "filename-to-setup mismatch"
+   assert all((folder / n).is_file() and (folder / n).stat().st_size for n in names)
+   print("RECONCILED: 22 setups, 22 unique captures")
+   PY
+     ARCHIVE=$(mktemp "$DAY/sealed_$(date +%Y%m%dT%H%M%S)_XXXXXX.tar")
+     tar -cf "$ARCHIVE" -C "$DAY" staged records
+     (cd "$DAY" && sha256sum "$(basename "$ARCHIVE")" > "$(basename "$ARCHIVE").sha256")
+     DEST=$(mktemp -d "$USB/sealed_$(date +%Y%m%dT%H%M%S)_XXXXXX")
+     cp "$ARCHIVE" "$ARCHIVE.sha256" "$DEST/"
+     sync
+     (cd "$DEST" && sha256sum -c "$(basename "$ARCHIVE").sha256")
+     printf '%s\n' "$DEST" > "$DAY/records/sealed_usb_verified.txt"
+     echo 'SEALED USB OK; CSI may now reset the fixture for a separate live run.'
+   )
+   ```
+
+5. **1:35–1:50 live, after `SEALED USB OK` and CSI's fixture reset.** CSI must use `IN`, a fresh live-only
+   folder, or a fresh feed after resetting the fixture and clearing buffered staged frames. Never reuse the staged
+   feed/folder: existing-file skipping does not protect late or rewritten staged captures. Log reset/start times.
+   The first live arrival must be after the watcher starts. Use the folder command below; independent stills
+   saved on request add `--gate each`. New filenames and a rewritten live-only filename are tested.
+
+   ```bash
+   (
+     set -euo pipefail
+     trap 'echo "STOP: live attempt failed; keep evidence and record the intervention." >&2' ERR
+     test -s "$DAY/records/sealed_usb_verified.txt"
+     test "$IN" != "$STAGED"
+     mkdir "$OUT"
+     cp "$DAY/operator.env" "$OUT/operator.env"
+     cd "$INSTALL/$PKG/code/twin_to_line"
+     "$PY" live_inspect.py --source "folder:$IN" --out "$OUT" 2>&1 | tee "$OUT/console.log"
+   )
+   ```
+
+   A stream requires CSI's approved RTSP/HTTP URL: `read -r -p 'Approved fresh live URL: ' SRC`, then replace
+   `--source "folder:$IN"` with `--source "stream:$SRC" --every 1.0` in the block. Real-camera streaming is
+   untested; local MJPEG drop/reconnect was tested. Raw devices are refused. Drops/timeouts: use CSI-saved
+   files; no reachable source: staging only. Keep original live captures/recording where CSI permits; the runtime
+   saves predictions and overlays, not a raw stream archive. Do not put credential-bearing URLs in paper notes.
+   Folder arrivals should log within about 1 s; events follow 4 s of arm-clear stillness. Sparse/changing stills
+   may remain `settling`: stop, request independent new captures, and restart with `--gate each`.
+   Before EVERY restart set a new timestamped output and update the context (never reuse an output):
+   `OUT="$DAY/attempts/live_$(date +%Y%m%dT%H%M%S)_${RANDOM}"`; append `printf 'OUT=%q\n' "$OUT" >> "$DAY/operator.env"`.
+   Log the gap: arrivals before restart are ignored. Do not replay them or any staged images on the day.
+
+   **Second terminal: its own directory and variables.** Paste the absolute `operator.env` path inside the
+   current `OUT`, printed/located by the first operator; this snapshot belongs to that attempt.
+
+   ```bash
+   read -r -p 'Current attempt operator.env absolute path: ' CONTEXT
+   source "$CONTEXT"
+   cd "$INSTALL/$PKG/code/twin_to_line"
+   tail -f "$OUT/trial_log.csv" | cut -d, -f6,8,77
+   ```
+
+   Ctrl-C here stops only `tail`. The first terminal prints the primary console grid; optional browser view is
+   `$OUT/view.html`. No browser: use the grid. No screen or terminal: CSI saves captures, labels and logs directly
+   to USB; review on the laptop afterwards, keeping staged predictions hidden until labels are locked. If an
+   already-running system is inaccessible, ask CSI to stop it and copy its evidence; do not assume a clean stop.
+   CSI refuses live: staging only, record the refusal and missing live demo. No USB mount: CSI must provide an
+   approved transfer route or retain the files; this fallback is not tested. Never claim an unverified backup.
+
+6. **1:50 stop.** Ctrl-C once in the first terminal; expect the frame/event summary and
+   `session.json` with `stop_reason: ctrl-c`. If the shell reports interruption before that summary, inspect the
+   session/logs and record an abnormal stop. Save the final label sheets and paper-log photo/transcription in
+   `records`, log every attempt/refusal/restart and actual start/stop times, and update `live_status.txt`.
+   On a staging-only day write the reason; no `results/live` directory is required for export.
+
+7. **1:50–2:00 export ALL visits/attempts and verify.** Stop all writers first. This archives every timestamped
+   visit under `~/ttl`, including failed installations, preflights, outputs, live captures, staged backups and
+   records. Retry visit folders are included. Ensure label sheets and the paper log are present; copy any
+   separately saved CSI evidence into a visit's `records` first. Space includes installation packages: bring a
+   USB with adequate free space (several GB plus recordings). No archive or USB destination is reused.
+
+   ```bash
+   (
+     set -euo pipefail
+     trap 'echo "STOP: final export failed; keep GB10 files and arrange CSI-assisted recovery." >&2' ERR
+     shopt -s nullglob
+     VISITS=("$HOME"/ttl/visit_*)
+     test "${#VISITS[@]}" -gt 0
+     EXPORT=$(mktemp -d "$HOME/ttl/export_$(date +%Y%m%dT%H%M%S)_XXXXXX")
+     ARCHIVE="$EXPORT/ttl_results_$(date +%Y%m%dT%H%M%S).tar"
+     NAMES=(); for v in "${VISITS[@]}"; do NAMES+=("$(basename "$v")"); done
+     tar -cf "$ARCHIVE" -C "$HOME/ttl" "${NAMES[@]}"
+     (cd "$EXPORT" && sha256sum "$(basename "$ARCHIVE")" > "$(basename "$ARCHIVE").sha256")
+     DEST=$(mktemp -d "$USB/results_$(date +%Y%m%dT%H%M%S)_XXXXXX")
+     cp "$ARCHIVE" "$ARCHIVE.sha256" "$DEST/"
+     sync
+     (cd "$DEST" && sha256sum -c "$(basename "$ARCHIVE").sha256")
+     echo "RESULTS USB OK: $DEST"
+   )
+   ```
+
+   Keep GB10 files until the Mac verifies the copied checksum (`shasum -a 256 -c` from its export directory).
+   Delete nothing unless CSI asks. Monday evening: adjudicate without predictions, lock labels by SHA256,
+   then use `score_sealed.py` (§5), once for all declared arms. No threshold changes or selection from test results.

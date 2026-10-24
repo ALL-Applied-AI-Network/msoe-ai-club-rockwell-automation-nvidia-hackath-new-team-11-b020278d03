@@ -64,14 +64,14 @@ def test_invalid_or_backward_names_fall_back_without_clock_jumps(tmp_path, monke
 
 
 @pytest.mark.parametrize("bad", ["permission_read", "permission_stat", "empty", "missing_jpeg_end",
-                                 "jpeg_trailing_bytes", "jpeg_trailing_zeroes", "png_trailing_bytes"])
+                                 "jpeg_trailing_bytes", "jpeg_mixed_trailer", "png_trailing_bytes"])
 def test_unacceptable_version_logs_once_after_three_seconds_then_accepts_repair(tmp_path, monkeypatch, bad):
     folder = tmp_path / "in"; folder.mkdir()
     path = folder / ("latest.png" if bad == "png_trailing_bytes" else "latest.jpg")
     valid = image_bytes(path.suffix)
     content = b"" if bad == "empty" else valid[:-2] if bad == "missing_jpeg_end" else valid
     if bad.endswith("trailing_bytes"): content += b"incomplete trailer"
-    if bad == "jpeg_trailing_zeroes": content += b"\x00\x00"
+    if bad == "jpeg_mixed_trailer": content += b"\x00x\x00"
     clock = [0.0]; denied = [True]
     monkeypatch.setattr(L.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(L.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0]+seconds))
@@ -120,3 +120,22 @@ def test_runbook_existing_install_does_not_exit_the_terminal(tmp_path):
                             cwd=tmp_path, capture_output=True, text=True)
     assert result.returncode == 0 and "TERMINAL_ALIVE" in result.stdout
     assert "fresh folder" in result.stdout.lower()
+
+
+@pytest.mark.parametrize("padding", [0, 1, 2, 12, 4096])
+def test_jpeg_zero_padding_is_complete_and_decodable(tmp_path, padding):
+    path = tmp_path / "padded.jpg"
+    path.write_bytes(image_bytes(".jpg") + b"\x00" * padding)
+    assert L.complete(str(path))
+    image, finished, unchanged = L.read_version(str(path))
+    assert finished and unchanged
+    assert image is not None and image.shape == (480, 640, 3)
+
+
+@pytest.mark.parametrize("trailer", [b"x", b"\x00x\x00", b"\x00" * 4096 + b"x"])
+def test_jpeg_nonzero_trailer_stays_incomplete(tmp_path, trailer):
+    path = tmp_path / "invalid.jpg"
+    path.write_bytes(image_bytes(".jpg") + trailer)
+    assert not L.complete(str(path))
+    image, finished, unchanged = L.read_version(str(path))
+    assert image is None and not finished and unchanged

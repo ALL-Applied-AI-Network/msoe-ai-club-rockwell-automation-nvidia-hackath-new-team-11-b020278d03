@@ -195,12 +195,12 @@ def complete(path):
     """The file ends with its format's end marker (a half-written JPEG still decodes, as a partly grey image)."""
     try:
         with open(path, "rb") as f:
-            f.seek(-12, os.SEEK_END); tail = f.read()
+            tail = f.read()
     except OSError:
         return False
     if path.lower().endswith(".png"):
         return tail.endswith(b"IEND\xaeB`\x82")
-    return tail.endswith(b"\xff\xd9")
+    return tail.rstrip(b"\x00").endswith(b"\xff\xd9")
 
 
 def replay(folder, ix=None):
@@ -234,7 +234,7 @@ def read_version(path, version=None):
             unchanged = False
         return None, False, unchanged
     finished = (data.endswith(b"IEND\xaeB`\x82") if path.lower().endswith(".png")
-                else data.endswith(b"\xff\xd9"))
+                else data.rstrip(b"\x00").endswith(b"\xff\xd9"))
     img = None
     if unchanged and finished:
         try:

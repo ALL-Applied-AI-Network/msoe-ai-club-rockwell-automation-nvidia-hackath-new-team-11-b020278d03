@@ -2,6 +2,7 @@
 
     python g3_check.py [--model-dir DIR] [--labels labels/dev_labels.csv] [--out DIR]
     python g3_check.py --rule-only --out DIR      # plumbing check: rule baseline only, the model is not loaded
+    python g3_check.py --rule-only --rule-thresholds rule_thresholds_synth.json --out DIR  # D033 arm B, once
 
 Fixed before the first run (Oct 23, D038):
   pipeline   one frame per placement event (results/prototype/events/events_run{1,2,3}_*.csv, events.py), the runtime
@@ -93,7 +94,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--model-dir"); ap.add_argument("--labels", default=LABELS); ap.add_argument("--out")
     ap.add_argument("--rule-only", action="store_true", help="plumbing check without the model")
+    ap.add_argument("--rule-thresholds", help="explicit rule threshold file; requires --rule-only and a new --out")
     a = ap.parse_args()
+    if a.rule_thresholds and not (a.rule_only and a.out):
+        ap.error("--rule-thresholds requires --rule-only and --out")
     from resnet_inspector import MODEL_DIR, ResNetInspector
     model_dir = a.model_dir or MODEL_DIR
     out = a.out or os.path.join(P.HERE, "results", "g3", os.path.basename(os.path.normpath(model_dir)))
@@ -111,11 +115,23 @@ def main():
                            "offset_px": list(pm.offset)},
               "labels": {"file": os.path.relpath(a.labels, P.HERE), "sha256": sha256(a.labels), "status": "draft, DEV only"},
               "arms": {}}
-    rule = RuleInspector()
+    rule = RuleInspector(a.rule_thresholds) if a.rule_thresholds else RuleInspector()
+    rule_info = rule.info()
+    rule_name, rule_note = "rule_baseline", "thresholds fitted on these DEV labels: reference only"
+    if a.rule_thresholds:
+        with open(a.rule_thresholds) as f:
+            metadata = json.load(f)
+        rule_name = "rule_synthetic" if metadata.get("fit_on", {}).get("split") == "val" else "rule_custom"
+        rule_note = metadata.get("note", "explicitly selected rule thresholds")
+        rule_info["status"] = rule_note
     rows, _ = predict(jobs, frames, rule, pm, plate)
     write_csv(os.path.join(out, "predictions_rule.csv"), rows)
-    report["arms"]["rule_baseline"] = {"inspector": rule.info(), "note": "thresholds fitted on these DEV labels: reference only",
-                                       **score(rows, labels)}
+    report["arms"][rule_name] = {"inspector": rule_info, "note": rule_note, **score(rows, labels)}
+    if a.rule_only:
+        m = report["arms"][rule_name]
+        report["g3"] = {"decided_by": rule_name, "go": m["meets_g3_criteria"],
+                        "rule": f"defect recall >= {RECALL_MIN} and false-positive rate <= {FPR_MAX}",
+                        "defect_recall": m["defect_recall"], "false_positive_rate": m["false_positive_rate"]}
     if not a.rule_only:
         d038 = ResNetInspector(model_dir, "d038")
         pre = ResNetInspector(model_dir, "preregistered", device=str(d038.device), model=d038.model)
@@ -149,7 +165,7 @@ def main():
               f"  FPR {m['false_positive_rate']:.4f} ({m['counts']['false_positives']}/{m['counts']['non_defects']})"
               f"  escalated {m['escalated_share']}  meets G3 criteria: {m['meets_g3_criteria']}")
     if "g3" in report:
-        print(f"G3 (decided by the D038 threshold): {'GO' if report['g3']['go'] else 'NO-GO'}")
+        print(f"G3 (decided by {report['g3']['decided_by']}): {'GO' if report['g3']['go'] else 'NO-GO'}")
     print(f"-> {out}/g3_report.json")
 
 
